@@ -180,6 +180,22 @@ export function useTripStore() {
     });
   }, [user]);
 
+  const togglePoiActive = useCallback((tripId, poiId) => {
+    setData(prev => {
+      const newTrips = prev.trips.map(t =>
+        t.id === tripId
+          ? {
+            ...t,
+            pois: t.pois.map(p => p.id === poiId ? { ...p, isActive: p.isActive === false ? true : false } : p)
+          }
+          : t
+      );
+      const updatedTrip = newTrips.find(t => t.id === tripId);
+      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      return { ...prev, trips: newTrips };
+    });
+  }, [user]);
+
   const removePoi = useCallback((tripId, poiId) => {
     setData(prev => {
       const newTrips = prev.trips.map(t =>
@@ -237,6 +253,22 @@ export function useTripStore() {
     });
   }, [user]);
 
+  const toggleAccommodationActive = useCallback((tripId, accId) => {
+    setData(prev => {
+      const newTrips = prev.trips.map(t =>
+        t.id === tripId
+          ? {
+            ...t,
+            accommodations: t.accommodations.map(a => a.id === accId ? { ...a, isActive: a.isActive === false ? true : false } : a)
+          }
+          : t
+      );
+      const updatedTrip = newTrips.find(t => t.id === tripId);
+      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      return { ...prev, trips: newTrips };
+    });
+  }, [user]);
+
   const selectAccommodation = useCallback((tripId, accId) => {
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, selectedAccommodation: accId } : t);
@@ -276,8 +308,10 @@ export function useTripStore() {
     addPoi,
     updatePoi,
     removePoi,
+    togglePoiActive,
     addAccommodation,
     removeAccommodation,
+    toggleAccommodationActive,
     selectAccommodation,
     saveDistances,
   };
