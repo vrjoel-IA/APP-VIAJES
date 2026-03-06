@@ -324,19 +324,23 @@ export default function TripView() {
                             <div key={poi.id} className="poi-item card animate-fade-in-up">
                                 <button
                                     type="button"
-                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
-                                    style={{ padding: '16px 16px 16px 8px', margin: '-8px 0 -8px -8px', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', zIndex: 10 }}
+                                    onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
+                                    style={{
+                                        width: '44px', height: '44px', flexShrink: 0,
+                                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent'
+                                    }}
                                 >
                                     <div
                                         style={{
                                             width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                                            border: poi.isActive ? 'none' : '2px solid var(--text-tertiary)',
-                                            background: poi.isActive ? 'var(--color-primary)' : 'transparent',
+                                            border: poi.isActive !== false ? 'none' : '2px solid var(--text-tertiary)',
+                                            background: poi.isActive !== false ? 'var(--color-primary)' : 'transparent',
                                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                                             color: 'white'
                                         }}
                                     >
-                                        {poi.isActive && <CheckCircle2 size={16} strokeWidth={3} />}
+                                        {poi.isActive !== false && <CheckCircle2 size={16} strokeWidth={3} />}
                                     </div>
                                 </button>
 
@@ -527,19 +531,23 @@ export default function TripView() {
                         <div key={acc.id} className="card acc-card animate-fade-in-up">
                             <button
                                 type="button"
-                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
-                                style={{ padding: '16px 16px 16px 8px', margin: '-8px 0 -8px -8px', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', zIndex: 10 }}
+                                onClick={(e) => { e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
+                                style={{
+                                    width: '44px', height: '44px', flexShrink: 0,
+                                    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent'
+                                }}
                             >
                                 <div
                                     style={{
                                         width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                                        border: acc.isActive ? 'none' : '2px solid var(--text-tertiary)',
-                                        background: acc.isActive ? 'var(--color-primary)' : 'transparent',
+                                        border: acc.isActive !== false ? 'none' : '2px solid var(--text-tertiary)',
+                                        background: acc.isActive !== false ? 'var(--color-primary)' : 'transparent',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                                         color: 'white'
                                     }}
                                 >
-                                    {acc.isActive && <CheckCircle2 size={16} strokeWidth={3} />}
+                                    {acc.isActive !== false && <CheckCircle2 size={16} strokeWidth={3} />}
                                 </div>
                             </button>
 
