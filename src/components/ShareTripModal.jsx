@@ -9,7 +9,7 @@ export default function ShareTripModal({ trip, store, onClose }) {
 
     // Determine the owner email. If trip.userId matches user.id, it's the current user. 
     // Otherwise we only have their ID right now, so we just say "Creador Original".
-    const isOwner = trip.userId === user?.id;
+    const isOwner = Boolean(trip?.userId && user?.id && trip.userId === user.id);
 
     const handleShare = (e) => {
         e.preventDefault();
@@ -83,7 +83,7 @@ export default function ShareTripModal({ trip, store, onClose }) {
 
                         {/* Invitados (Shared With) */}
                         {(trip.sharedWith || []).map(collaboratorEmail => {
-                            const isMe = collaboratorEmail.toLowerCase() === user?.email?.toLowerCase();
+                            const isMe = Boolean(collaboratorEmail && user?.email && collaboratorEmail.toLowerCase() === user.email.toLowerCase());
                             return (
                                 <div key={collaboratorEmail} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
