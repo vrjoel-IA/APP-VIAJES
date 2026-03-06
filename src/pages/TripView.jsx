@@ -321,41 +321,48 @@ export default function TripView() {
                     {/* POI List */}
                     <div className="poi-list stagger" style={{ padding: '0 var(--space-lg)' }}>
                         {filteredPois.map(poi => (
-                            <div key={poi.id} className="poi-item card animate-fade-in-up" onClick={() => setPoiDetail(poi)}>
+                            <div key={poi.id} className="poi-item card animate-fade-in-up">
                                 <button
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
-                                    style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent' }}
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
+                                    style={{ padding: '16px 16px 16px 8px', margin: '-8px 0 -8px -8px', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', zIndex: 10 }}
                                 >
                                     <div
                                         style={{
-                                            width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                                            border: poi.isActive ? 'none' : '2px solid var(--border-color)',
+                                            width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
+                                            border: poi.isActive ? 'none' : '2px solid var(--text-tertiary)',
                                             background: poi.isActive ? 'var(--color-primary)' : 'transparent',
                                             display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            color: 'white', marginRight: 4
+                                            color: 'white'
                                         }}
                                     >
-                                        {poi.isActive && <CheckCircle2 size={14} />}
+                                        {poi.isActive && <CheckCircle2 size={16} strokeWidth={3} />}
                                     </div>
                                 </button>
-                                <div className="poi-img">
-                                    <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt={poi.name} />
-                                </div>
-                                <div className="poi-info">
-                                    <h3 className="text-body" style={{ fontWeight: 700 }}>{poi.name}</h3>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
-                                        <span className="cat-dot" style={{ background: CATEGORY_MAP[poi.category]?.color || '#6b7280' }}></span>
-                                        <span className="text-caption text-secondary">{CATEGORY_MAP[poi.category]?.label || 'Otro'}</span>
-                                        {poi.rating && (
-                                            <span className="text-caption" style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#f5a623' }}>
-                                                <Star size={12} fill="#f5a623" /> {poi.rating}
-                                            </span>
-                                        )}
+
+                                <div
+                                    style={{ display: 'flex', gap: '12px', flex: 1, minWidth: 0, alignItems: 'center', cursor: 'pointer' }}
+                                    onClick={() => setPoiDetail(poi)}
+                                >
+                                    <div className="poi-img">
+                                        <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt={poi.name} />
+                                    </div>
+                                    <div className="poi-info">
+                                        <h3 className="text-body" style={{ fontWeight: 700 }}>{poi.name}</h3>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                                            <span className="cat-dot" style={{ background: CATEGORY_MAP[poi.category]?.color || '#6b7280' }}></span>
+                                            <span className="text-caption text-secondary">{CATEGORY_MAP[poi.category]?.label || 'Otro'}</span>
+                                            {poi.rating && (
+                                                <span className="text-caption" style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#f5a623' }}>
+                                                    <Star size={12} fill="#f5a623" /> {poi.rating}
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
-                                <button className="poi-delete" onClick={(e) => { e.stopPropagation(); store.removePoi(tripId, poi.id); }}>
-                                    <Trash2 size={16} />
+
+                                <button type="button" className="poi-delete" onClick={(e) => { e.stopPropagation(); store.removePoi(tripId, poi.id); }}>
+                                    <Trash2 size={18} />
                                 </button>
                             </div>
                         ))}
@@ -517,41 +524,45 @@ export default function TripView() {
                     </div>
 
                     {trip.accommodations.map(acc => (
-                        <div key={acc.id} className="card acc-card animate-fade-in-up"
-                            style={{ cursor: 'pointer' }}
-                            onClick={() => setAccDetail(acc)}
-                        >
+                        <div key={acc.id} className="card acc-card animate-fade-in-up">
                             <button
                                 type="button"
-                                onClick={(e) => { e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
-                                style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent' }}
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
+                                style={{ padding: '16px 16px 16px 8px', margin: '-8px 0 -8px -8px', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', zIndex: 10 }}
                             >
                                 <div
                                     style={{
-                                        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                                        border: acc.isActive ? 'none' : '2px solid var(--border-color)',
+                                        width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
+                                        border: acc.isActive ? 'none' : '2px solid var(--text-tertiary)',
                                         background: acc.isActive ? 'var(--color-primary)' : 'transparent',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        color: 'white', marginRight: 4
+                                        color: 'white'
                                     }}
                                 >
-                                    {acc.isActive && <CheckCircle2 size={14} />}
+                                    {acc.isActive && <CheckCircle2 size={16} strokeWidth={3} />}
                                 </div>
                             </button>
-                            <div className="acc-card-img">
-                                <img src={acc.photoUrl || getPlaceholderImage(acc.name)} alt={acc.name} />
-                                {trip.selectedAccommodation === acc.id && (
-                                    <div className="acc-winner-badge">
-                                        <Trophy size={12} /> Campamento Base
-                                    </div>
-                                )}
+
+                            <div
+                                style={{ display: 'flex', gap: '12px', flex: 1, minWidth: 0, alignItems: 'center', cursor: 'pointer' }}
+                                onClick={() => setAccDetail(acc)}
+                            >
+                                <div className="acc-card-img">
+                                    <img src={acc.photoUrl || getPlaceholderImage(acc.name)} alt={acc.name} />
+                                    {trip.selectedAccommodation === acc.id && (
+                                        <div className="acc-winner-badge">
+                                            <Trophy size={12} /> Campamento Base
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="acc-card-info">
+                                    <h3 style={{ fontWeight: 700, fontSize: '15px' }}>{acc.name}</h3>
+                                    <p className="text-caption text-secondary truncate">{acc.address}</p>
+                                </div>
                             </div>
-                            <div className="acc-card-info">
-                                <h3 style={{ fontWeight: 700, fontSize: '15px' }}>{acc.name}</h3>
-                                <p className="text-caption text-secondary truncate">{acc.address}</p>
-                            </div>
-                            <button className="poi-delete" onClick={(e) => { e.stopPropagation(); store.removeAccommodation(tripId, acc.id); }}>
-                                <Trash2 size={16} />
+
+                            <button type="button" className="poi-delete" onClick={(e) => { e.stopPropagation(); store.removeAccommodation(tripId, acc.id); }}>
+                                <Trash2 size={18} />
                             </button>
                         </div>
                     ))}
