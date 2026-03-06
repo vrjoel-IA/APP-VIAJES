@@ -1,9 +1,15 @@
 import { useState } from 'react';
 import { X, UserPlus, Trash2, Mail } from 'lucide-react';
+import { useAuthStore } from '../store/useAuthStore';
 
 export default function ShareTripModal({ trip, store, onClose }) {
     const [email, setEmail] = useState('');
     const [error, setError] = useState('');
+    const { user } = useAuthStore();
+
+    // Determine the owner email. If trip.userId matches user.id, it's the current user. 
+    // Otherwise we only have their ID right now, so we just say "Creador Original".
+    const isOwner = trip.userId === user?.id;
 
     const handleShare = (e) => {
         e.preventDefault();
@@ -62,37 +68,47 @@ export default function ShareTripModal({ trip, store, onClose }) {
                 <div>
                     <h3 className="text-body" style={{ fontWeight: 700, marginBottom: 'var(--space-md)' }}>Viajeros en este viaje:</h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+                        {/* Creador Item */}
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                 <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'var(--color-primary)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-                                    Creador
+                                    C
                                 </div>
                                 <div>
-                                    <p className="text-body" style={{ fontWeight: 600 }}>Tú (Creador)</p>
+                                    <p className="text-body" style={{ fontWeight: 600 }}>{isOwner ? 'Tú (Creador)' : 'Creador Original'}</p>
                                 </div>
                             </div>
                         </div>
 
-                        {(trip.sharedWith || []).map(collaboratorEmail => (
-                            <div key={collaboratorEmail} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'var(--text-tertiary)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-                                        {collaboratorEmail.charAt(0).toUpperCase()}
+                        {/* Invitados (Shared With) */}
+                        {(trip.sharedWith || []).map(collaboratorEmail => {
+                            const isMe = collaboratorEmail.toLowerCase() === user?.email?.toLowerCase();
+                            return (
+                                <div key={collaboratorEmail} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                        <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'var(--text-tertiary)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
+                                            {collaboratorEmail.charAt(0).toUpperCase()}
+                                        </div>
+                                        <div>
+                                            <p className="text-body truncate" style={{ fontWeight: 600, maxWidth: '180px' }}>
+                                                {isMe ? 'Tú' : collaboratorEmail}
+                                            </p>
+                                            <p className="text-caption text-secondary">Invitado</p>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <p className="text-body truncate" style={{ fontWeight: 600, maxWidth: '180px' }}>{collaboratorEmail}</p>
-                                        <p className="text-caption text-secondary">Invitado</p>
-                                    </div>
+                                    {isOwner && (
+                                        <button
+                                            onClick={() => store.removeCollaborator(trip.id, collaboratorEmail)}
+                                            style={{ padding: '8px', color: 'var(--color-danger)', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                                            title="Quitar acceso"
+                                        >
+                                            <Trash2 size={20} />
+                                        </button>
+                                    )}
                                 </div>
-                                <button
-                                    onClick={() => store.removeCollaborator(trip.id, collaboratorEmail)}
-                                    style={{ padding: '8px', color: 'var(--color-danger)', background: 'transparent', border: 'none', cursor: 'pointer' }}
-                                    title="Quitar acceso"
-                                >
-                                    <Trash2 size={20} />
-                                </button>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             </div>

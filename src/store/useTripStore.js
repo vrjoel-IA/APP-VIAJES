@@ -37,6 +37,7 @@ export function useTripStore() {
       // Parse JSON fields from Supabase
       const parsedTrips = (dbTrips || []).map(t => ({
         id: t.id,
+        userId: t.user_id, // Ensure we track the original creator
         name: t.name,
         destination: t.destination,
         destinationLat: t.destination_lat,
@@ -66,7 +67,7 @@ export function useTripStore() {
     if (!user) return;
     const dbFormat = tripsToSave.map(t => ({
       id: t.id,
-      user_id: user.id,
+      user_id: t.userId || user.id, // Use original creator ID if it exists, otherwise use current user
       name: t.name,
       destination: t.destination,
       destination_lat: t.destinationLat,
@@ -92,6 +93,7 @@ export function useTripStore() {
   const createTrip = useCallback(async (trip) => {
     const newTrip = {
       id: generateId(),
+      userId: user?.id,
       name: trip.name || 'Mi Viaje',
       destination: trip.destination || '',
       destinationLat: trip.destinationLat || null,
