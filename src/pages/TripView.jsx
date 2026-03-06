@@ -425,7 +425,7 @@ export default function TripView() {
                         onTilesLoaded={(e) => onMapLoad(e.map)}
                         style={{ width: '100%', height: '100%' }}
                     >
-                        {trip.pois.map(poi => (
+                        {trip.pois.filter(p => p.isActive !== false).map(poi => (
                             <AdvancedMarker
                                 key={poi.id}
                                 position={{ lat: poi.lat, lng: poi.lng }}
@@ -438,7 +438,7 @@ export default function TripView() {
                             </AdvancedMarker>
                         ))}
 
-                        {trip.accommodations.map(acc => (
+                        {trip.accommodations.filter(a => a.isActive !== false).map(acc => (
                             <AdvancedMarker
                                 key={acc.id}
                                 position={{ lat: acc.lat, lng: acc.lng }}
