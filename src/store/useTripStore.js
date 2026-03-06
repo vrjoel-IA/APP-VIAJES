@@ -17,10 +17,11 @@ export function useTripStore() {
     }
     setData(prev => ({ ...prev, loading: true }));
     try {
+      // Modify the select query: RLS in Supabase will filter the rows the user is allowed to see
+      // (either owner OR in shared_with array). We just ask for all allowed rows.
       const { data: dbTrips, error } = await supabase
         .from('trips')
         .select('*')
-        .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -46,6 +47,7 @@ export function useTripStore() {
         accommodations: safeParse(t.accommodations),
         distances: safeParse(t.distances),
         selectedAccommodation: t.selected_accommodation,
+        sharedWith: safeParse(t.shared_with),
         createdAt: t.created_at,
       }));
 
@@ -75,6 +77,7 @@ export function useTripStore() {
       accommodations: t.accommodations,
       distances: t.distances,
       selected_accommodation: t.selectedAccommodation,
+      shared_with: t.sharedWith || [],
     }));
 
     try {
@@ -99,6 +102,7 @@ export function useTripStore() {
       accommodations: [],
       distances: [],
       selectedAccommodation: null,
+      sharedWith: [],
       createdAt: new Date().toISOString(),
     };
 
@@ -133,6 +137,34 @@ export function useTripStore() {
   const updateTrip = useCallback((tripId, updates) => {
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, ...updates } : t);
+      const updatedTrip = newTrips.find(t => t.id === tripId);
+      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      return { ...prev, trips: newTrips };
+    });
+  }, [user]);
+
+  // ---- COLLABORATION ----
+  const shareTrip = useCallback((tripId, email) => {
+    setData(prev => {
+      const emailLower = email.toLowerCase().trim();
+      const newTrips = prev.trips.map(t => {
+        if (t.id !== tripId) return t;
+        if ((t.sharedWith || []).includes(emailLower)) return t; // Already shared
+        return { ...t, sharedWith: [...(t.sharedWith || []), emailLower] };
+      });
+      const updatedTrip = newTrips.find(t => t.id === tripId);
+      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      return { ...prev, trips: newTrips };
+    });
+  }, [user]);
+
+  const removeCollaborator = useCallback((tripId, email) => {
+    setData(prev => {
+      const emailLower = email.toLowerCase().trim();
+      const newTrips = prev.trips.map(t => {
+        if (t.id !== tripId) return t;
+        return { ...t, sharedWith: (t.sharedWith || []).filter(e => e !== emailLower) };
+      });
       const updatedTrip = newTrips.find(t => t.id === tripId);
       if (updatedTrip) saveTripsToDb([updatedTrip]);
       return { ...prev, trips: newTrips };
@@ -305,6 +337,8 @@ export function useTripStore() {
     deleteTrip,
     setActiveTrip,
     updateTrip,
+    shareTrip,
+    removeCollaborator,
     addPoi,
     updatePoi,
     removePoi,

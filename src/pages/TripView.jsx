@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
     Search, Plus, MapPin, Trash2, Star, Clock, ExternalLink,
     Hotel, BarChart3, Map as MapIcon, List, X, Navigation, Heart,
-    CheckCircle2, ChevronDown, ChevronUp, Trophy, ArrowRight
+    CheckCircle2, ChevronDown, ChevronUp, Trophy, ArrowRight, UserPlus
 } from 'lucide-react';
 import { Map, AdvancedMarker, InfoWindow, useApiIsLoaded } from '@vis.gl/react-google-maps';
 import PageHeader from '../components/PageHeader';
@@ -11,6 +11,7 @@ import ItineraryTab from '../components/ItineraryTab';
 import BulkImportModal from '../components/BulkImportModal';
 import PoiDetailModal from '../components/PoiDetailModal';
 import AccommodationDetailModal from '../components/AccommodationDetailModal';
+import ShareTripModal from '../components/ShareTripModal';
 import { useTripStore } from '../store/useTripStore';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
 import './TripView.css';
@@ -25,6 +26,7 @@ export default function TripView() {
     const [tab, setTab] = useState('places');
     const [showAddPoi, setShowAddPoi] = useState(false);
     const [showAddAcc, setShowAddAcc] = useState(false);
+    const [showShareModal, setShowShareModal] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [activeFilter, setActiveFilter] = useState('all');
@@ -281,6 +283,14 @@ export default function TripView() {
                 title={trip.name}
                 subtitle={trip.destination}
                 onBack={() => navigate('/')}
+                rightAction={
+                    <button
+                        onClick={() => setShowShareModal(true)}
+                        style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-secondary)', padding: '8px 12px', borderRadius: 'var(--radius-full)', color: 'var(--color-primary)', fontWeight: 600, fontSize: '14px', border: '1px solid var(--color-primary-light)' }}
+                    >
+                        <UserPlus size={16} /> Compartir
+                    </button>
+                }
             />
 
             {/* Tabs */}
@@ -715,6 +725,11 @@ export default function TripView() {
                 <div className="tab-content" style={{ padding: 'var(--space-lg) var(--space-lg) calc(var(--nav-height) + 120px) var(--space-lg)' }}>
                     <ItineraryTab trip={trip} store={store} />
                 </div>
+            )}
+
+            {/* ===== MODAL: SHARE TRIP ===== */}
+            {showShareModal && (
+                <ShareTripModal trip={trip} store={store} onClose={() => setShowShareModal(false)} />
             )}
 
             {/* ===== MODAL: ADD POI ===== */}
