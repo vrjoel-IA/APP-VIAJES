@@ -247,21 +247,22 @@ img {
 .btn-sticky {
   position: fixed;
   bottom: calc(var(--nav-height) + 24px);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
+  margin: 0 auto;
   width: calc(100% - 48px);
   max-width: 432px;
   z-index: 50;
   /* Evita que el hover transforme la posición del sticky */
-  will-change: box-shadow;
+  will-change: transform, box-shadow;
 }
 
 .btn-sticky:hover {
-  transform: translateX(-50%) translateY(-1px) !important;
+  transform: translateY(-1px) !important;
 }
 
 .btn-sticky:active {
-  transform: translateX(-50%) translateY(0px) !important;
+  transform: translateY(0px) !important;
 }
 
 .btn-disabled {
@@ -390,8 +391,9 @@ img {
 .nav-bar {
   position: fixed;
   bottom: 0;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
+  margin: 0 auto;
   width: 100%;
   max-width: 480px;
   height: var(--nav-height);

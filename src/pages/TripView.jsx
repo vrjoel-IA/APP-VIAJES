@@ -322,9 +322,10 @@ export default function TripView() {
                     <div className="poi-list stagger" style={{ padding: '0 var(--space-lg)' }}>
                         {filteredPois.map(poi => (
                             <div key={poi.id} className="poi-item card animate-fade-in-up" onClick={() => setPoiDetail(poi)}>
-                                <div
+                                <button
+                                    type="button"
                                     onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
-                                    style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                                    style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent' }}
                                 >
                                     <div
                                         style={{
@@ -337,7 +338,7 @@ export default function TripView() {
                                     >
                                         {poi.isActive && <CheckCircle2 size={14} />}
                                     </div>
-                                </div>
+                                </button>
                                 <div className="poi-img">
                                     <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt={poi.name} />
                                 </div>
@@ -371,8 +372,9 @@ export default function TripView() {
                         <div style={{
                             position: 'fixed',
                             bottom: 'calc(var(--nav-height) + 16px)',
-                            left: '50%',
-                            transform: 'translateX(-50%)',
+                            left: '0',
+                            right: '0',
+                            margin: '0 auto',
                             display: 'flex',
                             flexDirection: 'column',
                             gap: '8px',
@@ -519,9 +521,10 @@ export default function TripView() {
                             style={{ cursor: 'pointer' }}
                             onClick={() => setAccDetail(acc)}
                         >
-                            <div
+                            <button
+                                type="button"
                                 onClick={(e) => { e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
-                                style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                                style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent' }}
                             >
                                 <div
                                     style={{
@@ -534,7 +537,7 @@ export default function TripView() {
                                 >
                                     {acc.isActive && <CheckCircle2 size={14} />}
                                 </div>
-                            </div>
+                            </button>
                             <div className="acc-card-img">
                                 <img src={acc.photoUrl || getPlaceholderImage(acc.name)} alt={acc.name} />
                                 {trip.selectedAccommodation === acc.id && (

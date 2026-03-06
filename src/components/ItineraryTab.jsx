@@ -468,7 +468,9 @@ export default function ItineraryTab({ trip, store }) {
                                 className="card"
                                 style={{ padding: '12px', border: `1px solid ${isSelected ? 'var(--color-primary)' : 'transparent'}` }}
                             >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+                                <button
+                                    type="button"
+                                    style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', padding: '8px 0', width: '100%', textAlign: 'left' }}
                                     onClick={() => togglePoiSelection(poi.id)}
                                 >
                                     <div style={{
@@ -482,7 +484,7 @@ export default function ItineraryTab({ trip, store }) {
                                     <span style={{ flex: 1, fontWeight: isSelected ? 700 : 500, fontSize: '14px' }}>
                                         {categoryEmoji(poi.category)} {poi.name}
                                     </span>
-                                </div>
+                                </button>
                                 {isSelected && (
                                     <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginTop: '8px', paddingLeft: '30px' }}>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
