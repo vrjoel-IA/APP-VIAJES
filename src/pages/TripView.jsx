@@ -178,11 +178,13 @@ export default function TripView() {
 
     // ===== MAP INIT =====
     const onMapLoad = useCallback((map) => {
-        mapRef.current = map;
-        // Pan to the trip destination once the map is ready
-        if (mapCenter) map.panTo(mapCenter);
-        const ps = new window.google.maps.places.PlacesService(map);
-        placesService.current = ps;
+        if (!mapRef.current) {
+            mapRef.current = map;
+            // Solo hacer panTo en la primera carga inicial del mapa
+            if (mapCenter) map.panTo(mapCenter);
+            const ps = new window.google.maps.places.PlacesService(map);
+            placesService.current = ps;
+        }
     }, [mapCenter]);
 
     if (store.loading) return <div className="page-content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', fontWeight: 800, color: 'var(--color-primary)' }}>Cargando viaje...</div>;
@@ -322,15 +324,19 @@ export default function TripView() {
                             <div key={poi.id} className="poi-item card animate-fade-in-up" onClick={() => setPoiDetail(poi)}>
                                 <div
                                     onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
-                                    style={{
-                                        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                                        border: poi.isActive ? 'none' : '2px solid var(--border-color)',
-                                        background: poi.isActive ? 'var(--color-primary)' : 'transparent',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        color: 'white', marginRight: 4, cursor: 'pointer'
-                                    }}
+                                    style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                                 >
-                                    {poi.isActive && <CheckCircle2 size={14} />}
+                                    <div
+                                        style={{
+                                            width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                                            border: poi.isActive ? 'none' : '2px solid var(--border-color)',
+                                            background: poi.isActive ? 'var(--color-primary)' : 'transparent',
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            color: 'white', marginRight: 4
+                                        }}
+                                    >
+                                        {poi.isActive && <CheckCircle2 size={14} />}
+                                    </div>
                                 </div>
                                 <div className="poi-img">
                                     <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt={poi.name} />
@@ -515,15 +521,19 @@ export default function TripView() {
                         >
                             <div
                                 onClick={(e) => { e.stopPropagation(); store.toggleAccommodationActive(tripId, acc.id); }}
-                                style={{
-                                    width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                                    border: acc.isActive ? 'none' : '2px solid var(--border-color)',
-                                    background: acc.isActive ? 'var(--color-primary)' : 'transparent',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    color: 'white', marginRight: 4
-                                }}
+                                style={{ padding: '12px 12px 12px 0', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                             >
-                                {acc.isActive && <CheckCircle2 size={14} />}
+                                <div
+                                    style={{
+                                        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                                        border: acc.isActive ? 'none' : '2px solid var(--border-color)',
+                                        background: acc.isActive ? 'var(--color-primary)' : 'transparent',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        color: 'white', marginRight: 4
+                                    }}
+                                >
+                                    {acc.isActive && <CheckCircle2 size={14} />}
+                                </div>
                             </div>
                             <div className="acc-card-img">
                                 <img src={acc.photoUrl || getPlaceholderImage(acc.name)} alt={acc.name} />
