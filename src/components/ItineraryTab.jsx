@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import {
     Plus, Trash2, Navigation, Clock, CheckCircle2, Utensils,
-    Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X
+    Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X, Sparkles, Star
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { formatDuration } from '../utils/constants';
 import { searchNearbyRestaurant } from '../lib/places';
+import { generateAiItinerary, resolveSuggestions } from '../lib/ai';
 import { toast } from '../lib/toast';
 import PoiDetailModal from './PoiDetailModal';
 
@@ -64,6 +65,10 @@ export default function ItineraryTab({ trip, store }) {
 
     // Edit mode state
     const [editTimeline, setEditTimeline] = useState(null); // copy of timeline being edited
+
+    // AI state
+    const [aiLoading, setAiLoading] = useState(false);
+    const [aiSuggestions, setAiSuggestions] = useState([]); // lugares nuevos sugeridos por la IA (resueltos con Google)
 
     const itineraries = trip.itineraries || [];
     const allLocations = [
@@ -171,8 +176,15 @@ export default function ItineraryTab({ trip, store }) {
         });
     };
 
-    const generateRoute = async () => {
-        if (!startId || !endId || selectedPois.length === 0) {
+    // `opts` permite generar con una selección explícita (la IA la pasa directamente
+    // sin esperar a que el estado de React se actualice). Por defecto usa el formulario.
+    const generateRoute = async (opts = null) => {
+        const poiIds = opts?.poiIds ?? selectedPois;
+        const vh = opts?.visitHoursMap ?? visitHours;
+        const mt = opts?.mealTypesMap ?? mealTypes;
+        const dayTitle = opts?.title ?? title;
+
+        if (!startId || !endId || poiIds.length === 0) {
             return toast('Selecciona punto de salida, llegada y al menos 1 lugar.', 'info');
         }
         if (!apiIsLoaded) return toast('Google Maps aún no ha cargado. Espera un momento.', 'info');
@@ -181,15 +193,15 @@ export default function ItineraryTab({ trip, store }) {
 
         const startLoc = allLocations.find(l => l.id === startId);
         const endLoc = allLocations.find(l => l.id === endId);
-        const wps = selectedPois.map(id => trip.pois.find(p => p.id === id)).filter(Boolean);
+        const wps = poiIds.map(id => trip.pois.find(p => p.id === id)).filter(Boolean);
 
         const ds = new window.google.maps.DirectionsService();
 
         const foodWps = wps.filter(w => w.category === 'food');
         const routeWps = wps.filter(w => w.category !== 'food');
 
-        const lunchPoi = foodWps.find(w => mealTypes[w.id] === 'Almuerzo') || foodWps[0];
-        const dinnerPoi = foodWps.find(w => mealTypes[w.id] === 'Cena' || (w !== lunchPoi)) || (lunchPoi ? foodWps[1] : foodWps[0]);
+        const lunchPoi = foodWps.find(w => mt[w.id] === 'Almuerzo') || foodWps[0];
+        const dinnerPoi = foodWps.find(w => mt[w.id] === 'Cena' || (w !== lunchPoi)) || (lunchPoi ? foodWps[1] : foodWps[0]);
 
         try {
             let optimizedPois = [];
@@ -229,7 +241,7 @@ export default function ItineraryTab({ trip, store }) {
                     dinnerInserted = true;
                 }
                 sequence.push(poi);
-                currentMins += ((visitHours[poi.id] || VISIT_DURATION[poi.category] || 1.5) * 60) + 15;
+                currentMins += ((vh[poi.id] || VISIT_DURATION[poi.category] || 1.5) * 60) + 15;
             }
 
             if (!lunchInserted && lunchPoi) sequence.push({ ...lunchPoi, isMeal: true, mealTime: 'Almuerzo' });
@@ -300,19 +312,19 @@ export default function ItineraryTab({ trip, store }) {
                     currentTime = addMinutes(currentTime, place.mealTime === 'Cena' ? 90 : 75);
                     if (legs[i + 1]) currentTime = addMinutes(currentTime, legs[i + 1].durationMins);
                 } else {
-                    const visitMins = (visitHours[place.id] || VISIT_DURATION[place.category] || 1.5) * 60;
+                    const visitMins = (vh[place.id] || VISIT_DURATION[place.category] || 1.5) * 60;
                     timeline.push({
                         type: 'poi',
                         time: currentTime,
                         name: place.name,
                         category: place.category,
-                        visitHours: visitHours[place.id] || VISIT_DURATION[place.category] || 1.5,
+                        visitHours: vh[place.id] || VISIT_DURATION[place.category] || 1.5,
                         icon: categoryEmoji(place.category),
                         lat: place.lat,
                         lng: place.lng,
                         poiId: place.id,
                         rating: place.rating,
-                        visitDurationText: visitHours[place.id] ? `${visitHours[place.id]}h visita` : `~${VISIT_DURATION[place.category] || 1.5}h estimada`,
+                        visitDurationText: vh[place.id] ? `${vh[place.id]}h visita` : `~${VISIT_DURATION[place.category] || 1.5}h estimada`,
                         leg: legs[i + 1],
                     });
                     currentTime = addMinutes(currentTime, visitMins);
@@ -370,7 +382,7 @@ export default function ItineraryTab({ trip, store }) {
 
             const newItinerary = {
                 id: editingDay,
-                title,
+                title: dayTitle,
                 startTime,
                 startId,
                 endId,
@@ -394,6 +406,85 @@ export default function ItineraryTab({ trip, store }) {
         } finally {
             setGenerating(false);
         }
+    };
+
+    // POIs ya usados en itinerarios existentes (no se reutilizan al generar con IA).
+    const getAssignedPoiIds = () => {
+        const ids = new Set();
+        itineraries.forEach(it => (it.timeline || []).forEach(step => {
+            if (step.type === 'poi' && step.poiId) ids.add(step.poiId);
+        }));
+        return ids;
+    };
+
+    const handleGenerateAI = async () => {
+        if (!startId || !endId) return toast('Elige el punto de inicio y fin del día.', 'info');
+        if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
+
+        const assigned = getAssignedPoiIds();
+        const candidates = trip.pois.filter(p => p.isActive !== false && !assigned.has(p.id));
+        if (candidates.length === 0) {
+            return toast('No quedan lugares sin asignar. Añade más o edita un día existente.', 'info');
+        }
+
+        const startLoc = allLocations.find(l => l.id === startId);
+        const endLoc = allLocations.find(l => l.id === endId);
+
+        setAiLoading(true);
+        try {
+            const ai = await generateAiItinerary({
+                destination: trip.destination || '',
+                dayNumber: itineraries.length + 1,
+                startTime,
+                start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
+                end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
+                candidates: candidates.map(c => ({
+                    id: c.id, name: c.name, category: c.category,
+                    rating: c.rating, reviews: c.userRatingsTotal, lat: c.lat, lng: c.lng,
+                })),
+            });
+
+            const validIds = new Set(candidates.map(c => c.id));
+            const stops = (ai.stops || []).filter(s => validIds.has(s.poiId));
+            if (stops.length === 0) {
+                toast('La IA no encontró una combinación válida. Prueba a añadir más lugares.', 'info');
+                return;
+            }
+            const poiIds = stops.map(s => s.poiId);
+            const visitHoursMap = {};
+            stops.forEach(s => { if (s.visitHours) visitHoursMap[s.poiId] = s.visitHours; });
+
+            // Reutiliza el flujo de Google Directions (el resultado queda editable).
+            await generateRoute({ poiIds, visitHoursMap, mealTypesMap: {}, title: ai.dayTitle });
+
+            // Resuelve las sugerencias de lugares NUEVOS con Google Places.
+            const locationBias = trip.destinationLat && trip.destinationLng
+                ? { lat: trip.destinationLat, lng: trip.destinationLng }
+                : null;
+            const resolved = await resolveSuggestions(ai.suggestions || [], {
+                destination: trip.destination, locationBias,
+            });
+            const existingPlaceIds = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
+            setAiSuggestions(resolved.filter(r => !r.placeId || !existingPlaceIds.has(r.placeId)));
+        } catch (err) {
+            toast(`No se pudo generar con IA: ${err.message}`, 'error', 7000);
+        } finally {
+            setAiLoading(false);
+        }
+    };
+
+    const addSuggestionToTrip = (place) => {
+        store.addPoi(trip.id, {
+            name: place.name, placeId: place.placeId, category: 'other',
+            lat: place.lat, lng: place.lng, address: place.address || '',
+            rating: place.rating || null, userRatingsTotal: place.userRatingsTotal || null,
+            photoUrl: place.photoUrl || null, photos: place.photos || [],
+            openingHours: place.openingHours || null, website: place.website || null,
+            phoneNumber: place.phoneNumber || null, priceLevel: place.priceLevel ?? null,
+            types: place.types || [],
+        });
+        toast(`"${place.name}" añadido al viaje.`, 'success');
+        setAiSuggestions(prev => prev.filter(s => s.placeId !== place.placeId));
     };
 
     // ===== RENDER: EDIT FORM =====
@@ -436,8 +527,27 @@ export default function ItineraryTab({ trip, store }) {
                     </div>
                 </div>
 
+                {/* Generación con IA */}
+                <div className="card" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-primary)', background: 'var(--color-primary-light)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                        <Sparkles size={18} style={{ color: 'var(--color-primary)' }} />
+                        <span style={{ fontWeight: 800, fontSize: '14px', color: 'var(--color-primary)' }}>Generar con IA</span>
+                    </div>
+                    <p className="text-caption text-secondary" style={{ marginBottom: '10px' }}>
+                        Elige solo el inicio, el fin y la hora. La IA seleccionará los mejores lugares de tu lista,
+                        los ordenará por cercanía y te sugerirá sitios imprescindibles. Podrás editarlo después.
+                    </p>
+                    <button
+                        className="btn btn-primary btn-full"
+                        onClick={handleGenerateAI}
+                        disabled={aiLoading || generating || !startId || !endId}
+                    >
+                        {aiLoading ? '🧠 Pensando tu día...' : '✨ Generar día con IA'}
+                    </button>
+                </div>
+
                 {/* POI selection with visit hours */}
-                <h3 className="text-body" style={{ fontWeight: 700, marginBottom: '4px' }}>¿Qué vas a visitar?</h3>
+                <h3 className="text-body" style={{ fontWeight: 700, marginBottom: '4px' }}>O elígelos tú</h3>
                 <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
                     Selecciona los lugares e indica cuánto tiempo estimas. El itinerario incluirá almuerzo y cena automáticamente.
                 </p>
@@ -508,10 +618,10 @@ export default function ItineraryTab({ trip, store }) {
 
                 <button
                     className="btn btn-accent btn-full"
-                    onClick={generateRoute}
-                    disabled={generating || !startId || !endId || selectedPois.length === 0}
+                    onClick={() => generateRoute()}
+                    disabled={generating || aiLoading || !startId || !endId || selectedPois.length === 0}
                 >
-                    {generating ? '⏳ Calculando itinerario...' : '🗺️ Generar Itinerario Optimizado'}
+                    {generating ? '⏳ Calculando itinerario...' : '🗺️ Generar con mi selección'}
                 </button>
             </div>
         );
@@ -594,6 +704,43 @@ export default function ItineraryTab({ trip, store }) {
                     Genera rutas optimizadas con horarios y paradas de comida.
                 </p>
             </div>
+
+            {/* Sugerencias de la IA (lugares nuevos resueltos con Google Places) */}
+            {aiSuggestions.length > 0 && (
+                <div className="card animate-fade-in-up" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-primary)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Sparkles size={18} style={{ color: 'var(--color-primary)' }} />
+                            <span style={{ fontWeight: 800, fontSize: '14px' }}>La IA también te recomienda</span>
+                        </div>
+                        <button onClick={() => setAiSuggestions([])} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={16} /></button>
+                    </div>
+                    <p className="text-caption text-secondary" style={{ marginBottom: '12px' }}>
+                        Lugares que no tenías. Añádelos al viaje para incluirlos en un día.
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {aiSuggestions.map(s => (
+                            <div key={s.placeId} style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <span style={{ fontWeight: 700, fontSize: '13px' }} className="truncate">{s.name}</span>
+                                        {s.essential && (
+                                            <span style={{ fontSize: '9px', fontWeight: 800, color: 'var(--color-primary)', background: 'var(--color-primary-light)', padding: '2px 6px', borderRadius: 'var(--radius-full)', flexShrink: 0 }}>IMPRESCINDIBLE</span>
+                                        )}
+                                        {s.rating && (
+                                            <span className="text-caption" style={{ color: '#f5a623', display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}><Star size={11} fill="#f5a623" /> {s.rating}</span>
+                                        )}
+                                    </div>
+                                    <p className="text-caption text-secondary truncate">{s.aiReason}</p>
+                                </div>
+                                <button className="btn btn-outline" style={{ padding: '6px 12px', fontSize: '12px', width: 'auto', flexShrink: 0 }} onClick={() => addSuggestionToTrip(s)}>
+                                    <Plus size={14} /> Añadir
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <div>
                 {itineraries.map((itinerary) => {
