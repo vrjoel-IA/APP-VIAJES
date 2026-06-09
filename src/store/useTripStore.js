@@ -29,7 +29,7 @@ export function useTripStore() {
       const safeParse = (val) => {
         if (!val) return [];
         if (typeof val === 'string') {
-          try { return JSON.parse(val); } catch (e) { return []; }
+          try { return JSON.parse(val); } catch { return []; }
         }
         return Array.isArray(val) ? val : [];
       };

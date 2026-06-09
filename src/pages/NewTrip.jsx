@@ -4,6 +4,7 @@ import { MapPin, Calendar, Sparkles } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import PageHeader from '../components/PageHeader';
 import { useTripStore } from '../store/useTripStore';
+import { getDestinationSuggestions } from '../lib/places';
 import './NewTrip.css';
 
 export default function NewTrip() {
@@ -17,25 +18,23 @@ export default function NewTrip() {
     const [endDate, setEndDate] = useState('');
     const [suggestions, setSuggestions] = useState([]);
     const inputRef = useRef(null);
-    const autocompleteService = useRef(null);
     const geocoder = useRef(null);
 
     useEffect(() => {
         if (apiIsLoaded) {
-            autocompleteService.current = new window.google.maps.places.AutocompleteService();
             geocoder.current = new window.google.maps.Geocoder();
         }
     }, [apiIsLoaded]);
 
-    const handleDestChange = (val) => {
+    const handleDestChange = async (val) => {
         setDestination(val);
-        if (val.length > 2 && autocompleteService.current) {
-            autocompleteService.current.getPlacePredictions(
-                { input: val, types: ['(regions)'], language: 'es' },
-                (results) => {
-                    setSuggestions(results || []);
-                }
-            );
+        if (val.length > 2 && apiIsLoaded) {
+            try {
+                setSuggestions(await getDestinationSuggestions(val));
+            } catch (err) {
+                console.error('Autocomplete failed:', err);
+                setSuggestions([]);
+            }
         } else {
             setSuggestions([]);
         }
@@ -45,7 +44,7 @@ export default function NewTrip() {
         setDestination(suggestion.description);
         setSuggestions([]);
         if (geocoder.current) {
-            geocoder.current.geocode({ placeId: suggestion.place_id }, (results, status) => {
+            geocoder.current.geocode({ placeId: suggestion.placeId }, (results, status) => {
                 if (status === 'OK' && results[0]) {
                     const loc = results[0].geometry.location;
                     setDestCoords({ lat: loc.lat(), lng: loc.lng() });
@@ -98,7 +97,7 @@ export default function NewTrip() {
                     {suggestions.length > 0 && (
                         <ul className="suggestions-list">
                             {suggestions.map((s) => (
-                                <li key={s.place_id} onClick={() => handleSelectSuggestion(s)} className="suggestion-item">
+                                <li key={s.placeId} onClick={() => handleSelectSuggestion(s)} className="suggestion-item">
                                     <MapPin size={16} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
                                     <span>{s.description}</span>
                                 </li>

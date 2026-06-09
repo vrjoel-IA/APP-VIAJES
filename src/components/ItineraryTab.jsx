@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { formatDuration } from '../utils/constants';
+import { searchNearbyRestaurant } from '../lib/places';
+import { toast } from '../lib/toast';
 import PoiDetailModal from './PoiDetailModal';
 
 // Visit duration in hours by category (default estimates)
@@ -171,9 +173,9 @@ export default function ItineraryTab({ trip, store }) {
 
     const generateRoute = async () => {
         if (!startId || !endId || selectedPois.length === 0) {
-            return alert('Selecciona punto de salida, llegada y al menos 1 lugar.');
+            return toast('Selecciona punto de salida, llegada y al menos 1 lugar.', 'info');
         }
-        if (!apiIsLoaded) return alert('Google Maps aún no ha cargado. Espera un momento.');
+        if (!apiIsLoaded) return toast('Google Maps aún no ha cargado. Espera un momento.', 'info');
 
         setGenerating(true);
 
@@ -182,7 +184,6 @@ export default function ItineraryTab({ trip, store }) {
         const wps = selectedPois.map(id => trip.pois.find(p => p.id === id)).filter(Boolean);
 
         const ds = new window.google.maps.DirectionsService();
-        const ps = new window.google.maps.places.PlacesService(document.createElement('div'));
 
         const foodWps = wps.filter(w => w.category === 'food');
         const routeWps = wps.filter(w => w.category !== 'food');
@@ -264,7 +265,7 @@ export default function ItineraryTab({ trip, store }) {
                             icon: mode === 'WALKING' ? '🚶' : mode === 'TRANSIT' ? '🚌' : mode === 'BICYCLING' ? '🚲' : '🚗'
                         });
                     } else throw new Error();
-                } catch (e) {
+                } catch {
                     legs.push({ durationText: '10 min', distanceText: '---', durationSec: 600, durationMins: 10, mode: mode, icon: '🚗' });
                 }
                 currentLoc = { lat: place.lat, lng: place.lng };
@@ -322,23 +323,14 @@ export default function ItineraryTab({ trip, store }) {
                         hasLunch = true;
                         let restaurant = null;
                         try {
-                            restaurant = await new Promise((resolve) => {
-                                ps.nearbySearch({
-                                    location: { lat: place.lat, lng: place.lng }, radius: 1000, type: 'restaurant',
-                                    rankBy: window.google.maps.places.RankBy.PROMINENCE,
-                                }, (results, status) => {
-                                    if (status === window.google.maps.places.PlacesServiceStatus.OK && results?.length) {
-                                        resolve([...results].sort((a, b) => (b.rating || 0) - (a.rating || 0))[0]);
-                                    } else resolve(null);
-                                });
-                            });
-                        } catch (_) { }
+                            restaurant = await searchNearbyRestaurant({ lat: place.lat, lng: place.lng }, 1000);
+                        } catch { /* sin restaurante: se usa el lugar como fallback */ }
 
                         timeline.push({
                             type: 'meal', mealTime: 'Almuerzo', time: currentTime,
                             name: restaurant ? `🍴 ${restaurant.name}` : '🍴 Busca un restaurante cercano',
                             rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
-                            lat: restaurant?.geometry?.location.lat() || place.lat, lng: restaurant?.geometry?.location.lng() || place.lng,
+                            lat: restaurant?.lat || place.lat, lng: restaurant?.lng || place.lng,
                             icon: '🍴',
                         });
                         currentTime = addMinutes(currentTime, 75);
@@ -349,23 +341,14 @@ export default function ItineraryTab({ trip, store }) {
                         hasDinner = true;
                         let restaurant = null;
                         try {
-                            restaurant = await new Promise((resolve) => {
-                                ps.nearbySearch({
-                                    location: { lat: place.lat, lng: place.lng }, radius: 1500, type: 'restaurant',
-                                    rankBy: window.google.maps.places.RankBy.PROMINENCE,
-                                }, (results, status) => {
-                                    if (status === window.google.maps.places.PlacesServiceStatus.OK && results?.length) {
-                                        resolve([...results].sort((a, b) => (b.rating || 0) - (a.rating || 0))[0]);
-                                    } else resolve(null);
-                                });
-                            });
-                        } catch (_) { }
+                            restaurant = await searchNearbyRestaurant({ lat: place.lat, lng: place.lng }, 1500);
+                        } catch { /* sin restaurante: se usa el lugar como fallback */ }
 
                         timeline.push({
                             type: 'meal', mealTime: 'Cena', time: currentTime,
                             name: restaurant ? `🍴 ${restaurant.name}` : '🍴 Busca un restaurante cercano',
                             rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
-                            lat: restaurant?.geometry?.location.lat() || place.lat, lng: restaurant?.geometry?.location.lng() || place.lng,
+                            lat: restaurant?.lat || place.lat, lng: restaurant?.lng || place.lng,
                             icon: '🍴',
                         });
                         currentTime = addMinutes(currentTime, 90);
@@ -407,7 +390,7 @@ export default function ItineraryTab({ trip, store }) {
             store.updateTrip(trip.id, { itineraries: updatedList });
             setEditingDay(null);
         } catch (err) {
-            alert(`No se pudo calcular la ruta. Error: ${err.message}. Comprueba que 'Directions API' y 'Places API' están habilitadas en Google Cloud.`);
+            toast(`No se pudo calcular la ruta (${err.message}). Comprueba que Directions API y Places API estén habilitadas en Google Cloud.`, 'error', 6000);
         } finally {
             setGenerating(false);
         }

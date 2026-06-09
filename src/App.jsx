@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import { useAuthStore } from './store/useAuthStore';
 import NavBar from './components/NavBar';
+import Toaster from './components/Toast';
 import Explore from './pages/Explore';
 import MyTrips from './pages/MyTrips';
 import Profile from './pages/Profile';
@@ -85,6 +86,7 @@ export default function App() {
             <Route path="/trip/:tripId" element={<ProtectedRoute><TripView /></ProtectedRoute>} />
           </Routes>
           <NavBar />
+          <Toaster />
         </div>
       </BrowserRouter>
     </ErrorBoundary>

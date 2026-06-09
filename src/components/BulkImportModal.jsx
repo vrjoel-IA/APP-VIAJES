@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { X, Plus, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
+import { searchPlacesByText } from '../lib/places';
+import { toast } from '../lib/toast';
 
 
 // Mapping keywords → category
@@ -48,68 +50,48 @@ export default function BulkImportModal({ tripId, addPoi, onClose }) {
 
     const handleImport = async () => {
         if (!parsed.length) return;
-        if (!apiIsLoaded) return alert('Google Maps aún cargando. Espera un momento.');
+        if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
 
-        const ps = new window.google.maps.places.PlacesService(document.createElement('div'));
         setStatus('importing');
         setProgress({ done: 0, total: parsed.length });
         const resultList = [];
 
         for (let i = 0; i < parsed.length; i++) {
             const entry = parsed[i];
-            await new Promise((resolve) => {
-                ps.textSearch(
-                    { query: `${entry.name}`, language: 'es' },
-                    (res, s) => {
-                        if (s === window.google.maps.places.PlacesServiceStatus.OK && res[0]) {
-                            const p = res[0];
-                            // Get full details including photos
-                            ps.getDetails(
-                                {
-                                    placeId: p.place_id,
-                                    fields: ['name', 'place_id', 'geometry', 'formatted_address',
-                                        'rating', 'user_ratings_total', 'photos',
-                                        'opening_hours', 'website', 'formatted_phone_number',
-                                        'types', 'price_level'],
-                                    language: 'es',
-                                },
-                                (details, detailStatus) => {
-                                    const place = detailStatus === window.google.maps.places.PlacesServiceStatus.OK ? details : p;
-                                    const photos = place.photos
-                                        ? place.photos.slice(0, 5).map(ph => ph.getUrl({ maxWidth: 800 }))
-                                        : [];
-                                    addPoi(tripId, {
-                                        name: place.name,
-                                        placeId: place.place_id,
-                                        category: entry.category,
-                                        lat: place.geometry.location.lat(),
-                                        lng: place.geometry.location.lng(),
-                                        address: place.formatted_address || '',
-                                        rating: place.rating || null,
-                                        userRatingsTotal: place.user_ratings_total || null,
-                                        photoUrl: photos[0] || null,
-                                        photos,
-                                        openingHours: place.opening_hours?.weekday_text || null,
-                                        website: place.website || null,
-                                        phoneNumber: place.formatted_phone_number || null,
-                                        priceLevel: place.price_level ?? null,
-                                        types: place.types || [],
-                                    });
-                                    resultList.push({ name: entry.name, ok: true });
-                                    setProgress({ done: i + 1, total: parsed.length });
-                                    resolve();
-                                }
-                            );
-                        } else {
-                            resultList.push({ name: entry.name, ok: false });
-                            setProgress({ done: i + 1, total: parsed.length });
-                            resolve();
-                        }
-                    }
-                );
-            });
-            // Small delay to respect API rate limits
-            await new Promise(r => setTimeout(r, 300));
+            try {
+                // searchByText (API New) ya devuelve todos los campos normalizados,
+                // incluidas las fotos: no hace falta un getDetails aparte.
+                const matches = await searchPlacesByText(entry.name, { limit: 1 });
+                const place = matches[0];
+                if (place) {
+                    addPoi(tripId, {
+                        name: place.name,
+                        placeId: place.placeId,
+                        category: entry.category,
+                        lat: place.lat,
+                        lng: place.lng,
+                        address: place.address || '',
+                        rating: place.rating || null,
+                        userRatingsTotal: place.userRatingsTotal || null,
+                        photoUrl: place.photoUrl || null,
+                        photos: place.photos || [],
+                        openingHours: place.openingHours || null,
+                        website: place.website || null,
+                        phoneNumber: place.phoneNumber || null,
+                        priceLevel: place.priceLevel ?? null,
+                        types: place.types || [],
+                    });
+                    resultList.push({ name: entry.name, ok: true });
+                } else {
+                    resultList.push({ name: entry.name, ok: false });
+                }
+            } catch (err) {
+                console.error('Bulk import search failed:', err);
+                resultList.push({ name: entry.name, ok: false });
+            }
+            setProgress({ done: i + 1, total: parsed.length });
+            // Pequeña pausa para respetar los límites de la API.
+            await new Promise(r => setTimeout(r, 200));
         }
 
         setResults(resultList);

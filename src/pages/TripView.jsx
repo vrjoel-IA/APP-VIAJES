@@ -13,6 +13,8 @@ import PoiDetailModal from '../components/PoiDetailModal';
 import AccommodationDetailModal from '../components/AccommodationDetailModal';
 import ShareTripModal from '../components/ShareTripModal';
 import { useTripStore } from '../store/useTripStore';
+import { searchPlacesByText } from '../lib/places';
+import { toast } from '../lib/toast';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
 import './TripView.css';
 
@@ -29,6 +31,7 @@ export default function TripView() {
     const [showShareModal, setShowShareModal] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState([]);
+    const [searchLoading, setSearchLoading] = useState(false);
     const [activeFilter, setActiveFilter] = useState('all');
     const [selectedMarker, setSelectedMarker] = useState(null);
     const [poiDetail, setPoiDetail] = useState(null);
@@ -45,7 +48,6 @@ export default function TripView() {
     const [measureMode, setMeasureMode] = useState('DRIVING');
     const [measureResult, setMeasureResult] = useState(null);
 
-    const placesService = useRef(null);
     const mapRef = useRef(null);
     const apiIsLoaded = useApiIsLoaded();
 
@@ -116,7 +118,7 @@ export default function TripView() {
             { origins, destinations, travelMode: 'DRIVING', language: 'es' },
             (response, status) => {
                 setComparing(false);
-                if (status !== 'OK') return alert('Error al calcular distancias.');
+                if (status !== 'OK') return toast('Error al calcular distancias.', 'error');
 
                 const results = trip.accommodations.map((acc, i) => {
                     const row = response.rows[i];
@@ -184,8 +186,6 @@ export default function TripView() {
             mapRef.current = map;
             // Solo hacer panTo en la primera carga inicial del mapa
             if (mapCenter) map.panTo(mapCenter);
-            const ps = new window.google.maps.places.PlacesService(map);
-            placesService.current = ps;
         }
     }, [mapCenter]);
 
@@ -197,68 +197,62 @@ export default function TripView() {
         : trip.pois.filter(p => p.category === activeFilter);
 
     // ===== PLACES SEARCH =====
-    const handleSearch = () => {
+    const handleSearch = async () => {
         if (!searchQuery.trim()) return;
+        if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
 
-        if (!placesService.current && apiIsLoaded) {
-            placesService.current = new window.google.maps.places.PlacesService(document.createElement('div'));
-        }
-
-        if (!placesService.current) return;
-
-        const center = trip.destinationLat && trip.destinationLng
-            ? new window.google.maps.LatLng(trip.destinationLat, trip.destinationLng)
+        const locationBias = trip.destinationLat && trip.destinationLng
+            ? { lat: trip.destinationLat, lng: trip.destinationLng }
             : null;
-        placesService.current.textSearch(
-            {
-                query: searchQuery,
-                ...(center ? { location: center, radius: 50000 } : {}),
-                language: 'es',
-            },
-            (results, status) => {
-                if (status === window.google.maps.places.PlacesServiceStatus.OK) {
-                    setSearchResults(results.slice(0, 8));
-                } else {
-                    setSearchResults([]);
-                }
-            }
-        );
+
+        setSearchLoading(true);
+        try {
+            const results = await searchPlacesByText(searchQuery, { locationBias });
+            setSearchResults(results);
+            if (results.length === 0) toast('Sin resultados para esa búsqueda.', 'info');
+        } catch (err) {
+            console.error('Places search failed:', err);
+            setSearchResults([]);
+            toast('No se pudo buscar. Revisa la conexión o la API de Google Maps.', 'error');
+        } finally {
+            setSearchLoading(false);
+        }
     };
 
     const handleAddSearchResult = (place, category) => {
-        const photos = place.photos
-            ? place.photos.slice(0, 6).map(p => p.getUrl({ maxWidth: 800 }))
-            : [];
+        // `place` ya viene normalizado desde el adaptador de Places.
         store.addPoi(tripId, {
             name: place.name,
-            placeId: place.place_id,
+            placeId: place.placeId,
             category: category,
-            lat: place.geometry.location.lat(),
-            lng: place.geometry.location.lng(),
-            address: place.formatted_address || '',
+            lat: place.lat,
+            lng: place.lng,
+            address: place.address || '',
             rating: place.rating || null,
-            userRatingsTotal: place.user_ratings_total || null,
-            photoUrl: photos[0] || null,
-            photos: photos,
-            openingHours: place.opening_hours?.weekday_text || null,
+            userRatingsTotal: place.userRatingsTotal || null,
+            photoUrl: place.photoUrl || null,
+            photos: place.photos || [],
+            openingHours: place.openingHours || null,
             types: place.types || [],
             website: place.website || null,
-            phoneNumber: place.formatted_phone_number || null,
-            priceLevel: place.price_level ?? null,
+            phoneNumber: place.phoneNumber || null,
+            priceLevel: place.priceLevel ?? null,
         });
-        setSearchResults(prev => prev.filter(r => r.place_id !== place.place_id));
+        toast(`"${place.name}" añadido.`, 'success');
+        setSearchResults(prev => prev.filter(r => r.placeId !== place.placeId));
     };
 
     const handleAddAccResult = (place) => {
         store.addAccommodation(tripId, {
             name: place.name,
-            address: place.formatted_address || '',
-            lat: place.geometry.location.lat(),
-            lng: place.geometry.location.lng(),
-            placeId: place.place_id,
-            photoUrl: place.photos?.[0]?.getUrl({ maxWidth: 400 }) || null,
+            address: place.address || '',
+            lat: place.lat,
+            lng: place.lng,
+            placeId: place.placeId,
+            photoUrl: place.photoUrl || null,
         });
-        setSearchResults(prev => prev.filter(r => r.place_id !== place.place_id));
+        toast(`"${place.name}" añadido.`, 'success');
+        setSearchResults(prev => prev.filter(r => r.placeId !== place.placeId));
     };
 
 
@@ -758,15 +752,20 @@ export default function TripView() {
                             </button>
                         </div>
                         <div className="search-results">
+                            {searchLoading && (
+                                <p className="text-caption text-tertiary" style={{ padding: '16px', textAlign: 'center' }}>
+                                    Buscando lugares...
+                                </p>
+                            )}
                             {searchResults.map(place => (
-                                <div key={place.place_id} className="search-result-item">
+                                <div key={place.placeId} className="search-result-item">
                                     <div className="sr-main">
                                         <div className="sr-img">
-                                            <img src={place.photos?.[0]?.getUrl({ maxWidth: 100 }) || getPlaceholderImage(place.name)} alt={place.name} />
+                                            <img src={place.photoUrl || getPlaceholderImage(place.name)} alt={place.name} />
                                         </div>
                                         <div className="sr-info">
                                             <h4 className="truncate-2-lines" style={{ fontWeight: 700, fontSize: '14px', lineHeight: '1.2', marginBottom: '4px' }}>{place.name}</h4>
-                                            <p className="text-caption text-secondary truncate">{place.formatted_address}</p>
+                                            <p className="text-caption text-secondary truncate">{place.address}</p>
                                             {place.rating && (
                                                 <span className="text-caption" style={{ color: '#f5a623' }}>⭐ {place.rating}</span>
                                             )}
@@ -787,7 +786,7 @@ export default function TripView() {
                                     </div>
                                 </div>
                             ))}
-                            {searchResults.length === 0 && searchQuery && (
+                            {!searchLoading && searchResults.length === 0 && searchQuery && (
                                 <p className="text-caption text-tertiary" style={{ padding: '16px', textAlign: 'center' }}>
                                     Busca un lugar y selecciona su categoría para añadirlo
                                 </p>
@@ -825,14 +824,14 @@ export default function TripView() {
                         </div>
                         <div className="search-results">
                             {searchResults.map(place => (
-                                <div key={place.place_id} className="search-result-item">
+                                <div key={place.placeId} className="search-result-item">
                                     <div className="sr-main">
                                         <div className="sr-img">
-                                            <img src={place.photos?.[0]?.getUrl({ maxWidth: 100 }) || getPlaceholderImage(place.name)} alt={place.name} />
+                                            <img src={place.photoUrl || getPlaceholderImage(place.name)} alt={place.name} />
                                         </div>
                                         <div className="sr-info">
                                             <h4 className="truncate-2-lines" style={{ fontWeight: 700, fontSize: '14px', lineHeight: '1.2', marginBottom: '4px' }}>{place.name}</h4>
-                                            <p className="text-caption text-secondary truncate">{place.formatted_address}</p>
+                                            <p className="text-caption text-secondary truncate">{place.address}</p>
                                         </div>
                                     </div>
                                     <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%', marginTop: '8px' }}>
