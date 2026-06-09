@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
     Plus, Trash2, Navigation, Clock, CheckCircle2, Utensils,
-    Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X, Sparkles, Star
+    Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X, Sparkles, Star, PartyPopper
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { formatDuration } from '../utils/constants';
@@ -69,6 +69,7 @@ export default function ItineraryTab({ trip, store }) {
     // AI state
     const [aiLoading, setAiLoading] = useState(false);
     const [aiSuggestions, setAiSuggestions] = useState([]); // lugares nuevos sugeridos por la IA (resueltos con Google)
+    const [aiEvents, setAiEvents] = useState([]); // fiestas/eventos locales detectados para las fechas del viaje
 
     const itineraries = trip.itineraries || [];
     const allLocations = [
@@ -430,11 +431,26 @@ export default function ItineraryTab({ trip, store }) {
         const startLoc = allLocations.find(l => l.id === startId);
         const endLoc = allLocations.find(l => l.id === endId);
 
+        // Fecha concreta de este día = inicio del viaje + (díaN - 1), para que la IA
+        // tenga en cuenta fiestas/eventos temporales que coincidan con esas fechas.
+        const dayNumber = itineraries.length + 1;
+        let dayDate = null;
+        if (trip.startDate) {
+            const d = new Date(trip.startDate);
+            if (!isNaN(d)) {
+                d.setDate(d.getDate() + (dayNumber - 1));
+                dayDate = d.toISOString().slice(0, 10);
+            }
+        }
+
         setAiLoading(true);
         try {
             const ai = await generateAiItinerary({
                 destination: trip.destination || '',
-                dayNumber: itineraries.length + 1,
+                dayNumber,
+                dayDate,
+                tripStart: trip.startDate || null,
+                tripEnd: trip.endDate || null,
                 startTime,
                 start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
                 end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
@@ -443,6 +459,8 @@ export default function ItineraryTab({ trip, store }) {
                     rating: c.rating, reviews: c.userRatingsTotal, lat: c.lat, lng: c.lng,
                 })),
             });
+
+            setAiEvents(Array.isArray(ai.events) ? ai.events : []);
 
             const validIds = new Set(candidates.map(c => c.id));
             const stops = (ai.stops || []).filter(s => validIds.has(s.poiId));
@@ -704,6 +722,30 @@ export default function ItineraryTab({ trip, store }) {
                     Genera rutas optimizadas con horarios y paradas de comida.
                 </p>
             </div>
+
+            {/* Eventos y fiestas locales detectados por la IA para las fechas del viaje */}
+            {aiEvents.length > 0 && (
+                <div className="card animate-fade-in-up" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-gold)', background: 'var(--color-gold-light)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <PartyPopper size={18} style={{ color: 'var(--color-gold)' }} />
+                            <span style={{ fontWeight: 800, fontSize: '14px' }}>Fiestas y eventos en tus fechas</span>
+                        </div>
+                        <button onClick={() => setAiEvents([])} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={16} /></button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '8px' }}>
+                        {aiEvents.map((ev, i) => (
+                            <div key={i} style={{ borderLeft: '3px solid var(--color-gold)', paddingLeft: '10px' }}>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 700, fontSize: '13px' }}>{ev.name}</span>
+                                    {ev.date && <span className="text-caption" style={{ color: 'var(--color-gold)', fontWeight: 700 }}>{ev.date}</span>}
+                                </div>
+                                <p className="text-caption text-secondary" style={{ lineHeight: 1.5 }}>{ev.description}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* Sugerencias de la IA (lugares nuevos resueltos con Google Places) */}
             {aiSuggestions.length > 0 && (
