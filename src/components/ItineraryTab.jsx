@@ -418,6 +418,82 @@ export default function ItineraryTab({ trip, store }) {
         return ids;
     };
 
+    // Construye el itinerario completo a partir del plan razonado de la IA:
+    // geolocaliza paradas, resuelve restaurantes y calcula trayectos con Google.
+    const buildAiItinerary = async (ai, startLoc, endLoc, candidates) => {
+        const candMap = new Map(candidates.map(c => [c.id, c]));
+        const ds = new window.google.maps.DirectionsService();
+        const timeline = [];
+        const optimizedPois = [];
+        const geoPoints = [{ lat: startLoc.lat, lng: startLoc.lng }];
+        const geoStepIdx = [];
+
+        timeline.push({ type: 'departure', time: startTime, name: startLoc.name || 'Punto de partida', icon: '🚗' });
+        const departureIdx = timeline.length - 1;
+
+        for (const item of (ai.timeline || [])) {
+            if (item.type === 'poi') {
+                const poi = candMap.get(item.poiId);
+                if (!poi) continue;
+                const hrs = item.durationMins ? item.durationMins / 60 : (VISIT_DURATION[poi.category] || 1.5);
+                timeline.push({
+                    type: 'poi', time: item.startTime, name: poi.name, category: poi.category,
+                    visitHours: hrs, visitDurationText: `${Math.round(hrs * 10) / 10}h visita`,
+                    icon: categoryEmoji(poi.category), lat: poi.lat, lng: poi.lng, poiId: poi.id,
+                    rating: poi.rating, note: item.note || '',
+                });
+                optimizedPois.push({ lat: poi.lat, lng: poi.lng, name: poi.name });
+                geoPoints.push({ lat: poi.lat, lng: poi.lng });
+                geoStepIdx.push(timeline.length - 1);
+            } else if (item.type === 'meal') {
+                const near = geoPoints[geoPoints.length - 1];
+                let restaurant = null;
+                try { restaurant = await searchNearbyRestaurant(near, 1500); } catch { /* sin restaurante */ }
+                const lat = restaurant?.lat || near.lat;
+                const lng = restaurant?.lng || near.lng;
+                timeline.push({
+                    type: 'meal', mealTime: item.mealType || 'Comida', time: item.startTime,
+                    name: restaurant ? `🍴 ${restaurant.name}` : `🍴 ${item.name}`,
+                    rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
+                    lat, lng, icon: '🍴', note: item.note || '',
+                });
+                geoPoints.push({ lat, lng });
+                geoStepIdx.push(timeline.length - 1);
+            } else {
+                timeline.push({
+                    type: 'free', time: item.startTime, name: item.name, icon: '✨', note: item.note || '',
+                    visitDurationText: item.durationMins ? `${Math.round(item.durationMins / 60 * 10) / 10}h` : '',
+                });
+            }
+        }
+
+        const last = ai.timeline?.[ai.timeline.length - 1];
+        const arrivalTime = last ? addMinutes(last.startTime, last.durationMins || 0) : startTime;
+        timeline.push({ type: 'arrival', time: arrivalTime, name: endLoc.name || 'Destino final', icon: '🏁' });
+        geoPoints.push({ lat: endLoc.lat, lng: endLoc.lng });
+
+        // Trayectos reales entre puntos geolocalizados consecutivos.
+        const legs = [];
+        for (let i = 0; i < geoPoints.length - 1; i++) {
+            let leg = null;
+            try {
+                leg = await new Promise(resolve => {
+                    ds.route({ origin: geoPoints[i], destination: geoPoints[i + 1], travelMode: 'DRIVING' },
+                        (res, st) => resolve(st === 'OK' ? res.routes[0].legs[0] : null));
+                });
+            } catch { /* sin trayecto */ }
+            legs.push(leg
+                ? { durationText: leg.duration.text, distanceText: leg.distance.text, durationSec: leg.duration.value, durationMins: leg.duration.value / 60, mode: 'DRIVING', icon: '🚗' }
+                : { durationText: '—', distanceText: '—', durationSec: 0, durationMins: 0, mode: 'DRIVING', icon: '🚗' });
+            await new Promise(r => setTimeout(r, 150));
+        }
+        if (legs[0]) timeline[departureIdx].leg = legs[0];
+        geoStepIdx.forEach((idx, k) => { if (legs[k + 1]) timeline[idx].leg = legs[k + 1]; });
+
+        const totalDurationSec = legs.reduce((a, b) => a + (b.durationSec || 0), 0);
+        return { timeline, optimizedPois, legs, totalDurationSec };
+    };
+
     const handleGenerateAI = async () => {
         if (!startId || !endId) return toast('Elige el punto de inicio y fin del día.', 'info');
         if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
@@ -462,18 +538,28 @@ export default function ItineraryTab({ trip, store }) {
 
             setAiEvents(Array.isArray(ai.events) ? ai.events : []);
 
-            const validIds = new Set(candidates.map(c => c.id));
-            const stops = (ai.stops || []).filter(s => validIds.has(s.poiId));
-            if (stops.length === 0) {
+            const built = await buildAiItinerary(ai, startLoc, endLoc, candidates);
+            if (built.optimizedPois.length === 0) {
                 toast('La IA no encontró una combinación válida. Prueba a añadir más lugares.', 'info');
                 return;
             }
-            const poiIds = stops.map(s => s.poiId);
-            const visitHoursMap = {};
-            stops.forEach(s => { if (s.visitHours) visitHoursMap[s.poiId] = s.visitHours; });
 
-            // Reutiliza el flujo de Google Directions (el resultado queda editable).
-            await generateRoute({ poiIds, visitHoursMap, mealTypesMap: {}, title: ai.dayTitle });
+            const newItinerary = {
+                id: editingDay,
+                title: ai.dayTitle || `Día ${dayNumber}`,
+                summary: ai.summary || '',
+                startTime, startId, endId, startLoc, endLoc,
+                optimizedPois: built.optimizedPois,
+                legs: built.legs,
+                timeline: built.timeline,
+                totalDurationSec: built.totalDurationSec,
+            };
+            const existingIndex = itineraries.findIndex(i => i.id === editingDay);
+            const updatedList = [...itineraries];
+            if (existingIndex >= 0) updatedList[existingIndex] = newItinerary;
+            else updatedList.push(newItinerary);
+            store.updateTrip(trip.id, { itineraries: updatedList });
+            setEditingDay(null);
 
             // Resuelve las sugerencias de lugares NUEVOS con Google Places.
             const locationBias = trip.destinationLat && trip.destinationLng
@@ -817,6 +903,13 @@ export default function ItineraryTab({ trip, store }) {
                                 </div>
                             </div>
 
+                            {/* Resumen razonado del día (estilo guía) */}
+                            {itinerary.summary && (
+                                <p className="text-caption text-secondary" style={{ marginBottom: 14, lineHeight: 1.55, fontStyle: 'italic' }}>
+                                    {itinerary.summary}
+                                </p>
+                            )}
+
                             {/* Open in Google Maps button */}
                             {mapsUrl && (
                                 <a
@@ -834,7 +927,7 @@ export default function ItineraryTab({ trip, store }) {
                             {/* Timeline */}
                             {(itinerary.timeline || []).map((step, i) => {
                                 const isLast = i === itinerary.timeline.length - 1;
-                                const dotColor = step.type === 'meal' ? '#f97316' : step.type === 'poi' ? 'var(--color-primary)' : '#6b7280';
+                                const dotColor = step.type === 'meal' ? '#f97316' : step.type === 'poi' ? 'var(--color-primary)' : step.type === 'free' ? 'var(--color-gold)' : '#6b7280';
                                 const poiData = step.poiId ? trip.pois.find(p => p.id === step.poiId) : null;
                                 return (
                                     <div key={i} style={{ display: 'flex', gap: '12px' }}>
@@ -852,6 +945,7 @@ export default function ItineraryTab({ trip, store }) {
                                             }}>
                                                 {step.type === 'poi' ? (itinerary.timeline.slice(0, i).filter(s => s.type === 'poi').length + 1) : ''}
                                                 {step.type === 'meal' && <Utensils size={10} />}
+                                                {step.type === 'free' && <Sparkles size={10} />}
                                                 {(step.type === 'departure' || step.type === 'arrival') && <Navigation size={9} />}
                                             </div>
                                             {!isLast && <div style={{ width: '2px', flex: 1, background: 'var(--border-color)', margin: '4px 0', minHeight: '20px' }} />}
@@ -881,6 +975,11 @@ export default function ItineraryTab({ trip, store }) {
                                                     {step.mealTime}
                                                     {step.rating && ` · ⭐ ${step.rating}`}
                                                     {step.vicinity && ` · ${step.vicinity}`}
+                                                </span>
+                                            )}
+                                            {step.note && (
+                                                <span className="text-caption text-secondary" style={{ marginLeft: '50px', display: 'block', lineHeight: 1.45, marginTop: '3px' }}>
+                                                    {step.note}
                                                 </span>
                                             )}
                                         </div>

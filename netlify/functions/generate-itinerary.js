@@ -4,19 +4,17 @@
 // La GEMINI_API_KEY vive aquí como variable de entorno (Netlify → Site settings
 // → Environment variables) y NUNCA llega al navegador.
 //
-// Reparto de responsabilidades:
-//   - Gemini: actúa como GUÍA LOCAL EXPERTO. Elige/prioriza entre los lugares del
-//     usuario, sugiere lugares nuevos imprescindibles y avisa de fiestas/eventos
-//     temporales según las fechas del viaje (San Juan, Fallas, fiestas patronales…).
-//   - Google Places (en el cliente): valida y geolocaliza las sugerencias.
+// La IA actúa como GUÍA LOCAL EXPERTO y DISEÑA EL DÍA COMPLETO con razonamiento:
+// bloques temáticos coherentes, horas de comida realistas (almuerzo ~14-15h,
+// cena ~21-22h), ritmo lógico y un "porqué" en cada parada. También avisa de
+// fiestas/eventos temporales según las fechas y sugiere lugares nuevos.
+//
+// El cliente solo geolocaliza, calcula trayectos con Google y lo pinta.
 //
 // Recibe (POST JSON): { destination, dayNumber, dayDate, tripStart, tripEnd,
 //                       startTime, start, end, candidates }
-// Devuelve: { dayTitle, stops, suggestions, events, rationale }
+// Devuelve: { dayTitle, summary, timeline, suggestions, events, model }
 
-// Modelos a intentar en orden (el primero que responda se usa). Configurable con
-// la variable GEMINI_MODEL. Esto evita el 404 si un nombre de modelo no existe
-// para tu clave/versión de API.
 const MODEL_CANDIDATES = process.env.GEMINI_MODEL
   ? [process.env.GEMINI_MODEL]
   : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-1.5-flash'];
@@ -25,15 +23,21 @@ const RESPONSE_SCHEMA = {
   type: 'OBJECT',
   properties: {
     dayTitle: { type: 'STRING' },
-    stops: {
+    summary: { type: 'STRING' },
+    timeline: {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
         properties: {
-          poiId: { type: 'STRING' },
-          visitHours: { type: 'NUMBER' },
+          type: { type: 'STRING' }, // 'poi' | 'meal' | 'free'
+          poiId: { type: 'STRING' }, // solo para type 'poi' (id de un candidato)
+          name: { type: 'STRING' },
+          startTime: { type: 'STRING' }, // HH:MM
+          durationMins: { type: 'NUMBER' },
+          mealType: { type: 'STRING' }, // Desayuno | Almuerzo | Cena
+          note: { type: 'STRING' }, // consejo/razonamiento de guía
         },
-        required: ['poiId', 'visitHours'],
+        required: ['type', 'name', 'startTime', 'durationMins'],
       },
     },
     suggestions: {
@@ -60,9 +64,8 @@ const RESPONSE_SCHEMA = {
         required: ['name', 'description'],
       },
     },
-    rationale: { type: 'STRING' },
   },
-  required: ['dayTitle', 'stops'],
+  required: ['dayTitle', 'timeline'],
 };
 
 function buildPrompt({ destination, dayNumber, dayDate, tripStart, tripEnd, startTime, start, end, candidates }) {
@@ -73,61 +76,65 @@ function buildPrompt({ destination, dayNumber, dayDate, tripStart, tripEnd, star
     )
     .join('\n');
 
-  const fecha = dayDate
-    ? `La fecha concreta de este día es ${dayDate}.`
-    : 'No se conoce la fecha exacta del viaje.';
+  const fecha = dayDate ? `La fecha concreta de este día es ${dayDate}.` : 'No se conoce la fecha exacta.';
   const rango = tripStart && tripEnd ? ` El viaje completo va del ${tripStart} al ${tripEnd}.` : '';
 
-  return `Actúa como un GUÍA LOCAL EXPERTO de ${destination || 'el destino'}, no como un asistente genérico.
-Conoces a fondo la zona: sus fiestas, tradiciones, temporadas y ritmo real.
+  return `Eres un GUÍA LOCAL EXPERTO de ${destination || 'el destino'}. Diseña el día como lo haría
+un planificador humano con sentido común, NO como un asistente genérico que solo lista lugares.
 
-Planifica UN solo día (día ${dayNumber}) de ruta. El día empieza a las ${startTime}.
+Planifica UN día completo (día ${dayNumber}). Empieza a las ${startTime} en el punto de inicio
+y termina en el punto final.
 ${fecha}${rango}
-Punto de inicio: ${start.name} (${start.lat},${start.lng}).
-Punto de fin: ${end.name} (${end.lat},${end.lng}).
+Inicio: ${start.name} (${start.lat},${start.lng}).
+Fin: ${end.name} (${end.lat},${end.lng}).
 
-LUGARES CANDIDATOS que el usuario ya ha guardado (aún sin asignar a ningún día):
+LUGARES CANDIDATOS del usuario (aún sin asignar a ningún día):
 ${list || '(ninguno)'}
 
-INSTRUCCIONES:
-1. De los candidatos, selecciona un subconjunto REALISTA para un único día: debe caber
-   entre las ${startTime} y ~21:00 contando tiempo de visita y desplazamientos. Calidad
-   sobre cantidad (normalmente 3 a 6 lugares según su tamaño y cercanía).
-2. Prioriza los mejor valorados e icónicos, pero agrupa los que estén geográficamente
-   CERCA entre sí y en la ruta entre inicio y fin, para minimizar distancias. Ordénalos.
-3. CONTEXTO LOCAL Y TEMPORAL (muy importante): ten en cuenta fiestas locales y eventos
-   temporales que coincidan con la fecha del viaje (p. ej. la noche de San Juan, las
-   Fallas, Semana Santa, carnavales, fiestas patronales, mercados o festivales), así como
-   la temporada/clima y horarios estacionales. Si algo relevante coincide con estas fechas
-   en ${destination || 'la zona'}, tenlo en cuenta al elegir la zona y los lugares del día,
-   y descríbelo en "events" (con su fecha si la sabes). No inventes eventos que no existan;
-   si no hay ninguno relevante, devuelve "events" vacío.
-4. Asigna a cada parada horas de visita razonables según su categoría.
-5. Usa EXCLUSIVAMENTE los id de la lista de candidatos en "stops".
-6. En "suggestions" propón hasta 3 lugares famosos o imprescindibles de ${destination || 'la zona'}
-   que NO estén ya en la lista de candidatos. Marca essential=true los imprescindibles y
-   essential=false los que serían un buen extra "si sobra tiempo". Solo nombre y razón
-   breve. NO inventes coordenadas ni ids.
-7. "dayTitle": un título corto y atractivo para el día.
+REGLAS DE DISEÑO (muy importantes):
+1. COHERENCIA POR BLOQUES. Agrupa actividades compatibles y por zona geográfica. Si una mañana
+   es de PLAYA, dedícale un tiempo realista (2 a 4 h) y encadénala con cosas compatibles
+   (paseo costero, chiringuito). NO pongas justo después una visita cultural a un pueblo si la
+   gente va en bañador: los cambios de "registro" (playa → cultura) deben ocurrir en transiciones
+   lógicas (después de comer, tras pasar por el alojamiento a cambiarse, etc.).
+2. HORAS DE COMIDA REALISTAS (España): desayuno opcional ~9:00; ALMUERZO entre 14:00 y 15:00;
+   CENA entre 21:00 y 22:30. NUNCA comer a las 12:00 ni cenar a las 19:00. Coloca la comida cerca
+   de donde estés en ese momento.
+3. RITMO REALISTA. Asigna startTime (HH:MM) y durationMins razonables a cada parada, contando los
+   desplazamientos entre lugares (usa las coordenadas para estimar cercanía y no encadenar sitios
+   lejanos sin sentido). No amontones; deja margen. Calidad sobre cantidad (3 a 6 paradas/día).
+4. Prioriza los lugares mejor valorados e icónicos de entre los candidatos.
+5. CONSTRUYE "timeline" como la secuencia ordenada del día:
+   - type:"poi" para visitas a candidatos (incluye su poiId EXACTO de la lista).
+   - type:"meal" con mealType para las comidas (no llevan poiId).
+   - type:"free" para tiempo libre/paseo/descanso/atardecer que dé ritmo (sin poiId; no inventes
+     lugares con dirección).
+   - En "note" de cada parada, una frase de guía con el porqué o un consejo práctico
+     (p. ej. "Lleva bañador y agua; comeremos cerca sin volver al hotel").
+6. "summary": 2-3 frases explicando la lógica del día (qué bloque por la mañana, por la tarde…).
+7. CONTEXTO TEMPORAL: ten en cuenta fiestas locales y eventos que coincidan con la fecha (San Juan,
+   Fallas, Semana Santa, carnavales, fiestas patronales, festivales) y la temporada. Si algo
+   relevante coincide, tenlo en cuenta en el plan y descríbelo en "events" (vacío si no hay nada).
+8. "suggestions": hasta 3 lugares famosos/imprescindibles de ${destination || 'la zona'} que NO estén
+   en los candidatos (solo nombre + razón; essential=true los imprescindibles). NO inventes coords.
 
-Sé concreto y específico de la zona y la fecha; nada de respuestas genéricas.`;
+Sé concreto, específico de la zona y la fecha, y con criterio de guía local.`;
 }
 
 async function callGemini(model, apiKey, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  const res = await fetch(url, {
+  return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.5,
+        temperature: 0.6,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
       },
     }),
   });
-  return res;
 }
 
 exports.handler = async (event) => {
@@ -157,7 +164,6 @@ exports.handler = async (event) => {
   const prompt = buildPrompt(payload);
   let lastError = 'Sin respuesta';
 
-  // Prueba los modelos en orden; si uno da 404 (no existe), pasa al siguiente.
   for (const model of MODEL_CANDIDATES) {
     let res;
     try {
@@ -169,25 +175,18 @@ exports.handler = async (event) => {
 
     if (res.status === 404) {
       lastError = `Modelo ${model} no disponible (404).`;
-      continue; // probar el siguiente modelo
+      continue;
     }
 
     if (!res.ok) {
       const detail = await res.text();
-      return {
-        statusCode: 502,
-        headers,
-        body: JSON.stringify({ error: `Error de Gemini (${res.status}).`, detail: detail.slice(0, 500) }),
-      };
+      return { statusCode: 502, headers, body: JSON.stringify({ error: `Error de Gemini (${res.status}).`, detail: detail.slice(0, 500) }) };
     }
 
     try {
       const data = await res.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) {
-        lastError = 'Gemini no devolvió contenido.';
-        continue;
-      }
+      if (!text) { lastError = 'Gemini no devolvió contenido.'; continue; }
       const parsed = JSON.parse(text);
       return { statusCode: 200, headers, body: JSON.stringify({ ...parsed, model }) };
     } catch (err) {
@@ -196,9 +195,5 @@ exports.handler = async (event) => {
     }
   }
 
-  return {
-    statusCode: 502,
-    headers,
-    body: JSON.stringify({ error: `No se pudo generar con ningún modelo de Gemini. ${lastError}` }),
-  };
+  return { statusCode: 502, headers, body: JSON.stringify({ error: `No se pudo generar con ningún modelo de Gemini. ${lastError}` }) };
 };
