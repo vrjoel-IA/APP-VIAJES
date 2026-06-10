@@ -118,7 +118,7 @@ export default function TripView() {
     }, [measureSource, measureDest, measureMode, apiIsLoaded]);
 
     // ===== COMPARISON =====
-    const runComparison = useCallback(() => {
+    const runComparison = useCallback(async () => {
         if (!trip || trip.accommodations.length === 0 || trip.pois.length === 0) return;
         setComparing(true);
 
@@ -126,77 +126,95 @@ export default function TripView() {
         const origins = trip.accommodations.map(a => new window.google.maps.LatLng(a.lat, a.lng));
         const destinations = trip.pois.map(p => new window.google.maps.LatLng(p.lat, p.lng));
 
-        service.getDistanceMatrix(
-            { origins, destinations, travelMode: 'DRIVING', language: 'es' },
-            (response, status) => {
-                setComparing(false);
-                if (status !== 'OK') {
-                    const hint = status === 'REQUEST_DENIED'
-                        ? ' Habilita "Distance Matrix API" en Google Cloud.'
-                        : status === 'MAX_ELEMENTS_EXCEEDED' || status === 'MAX_DIMENSIONS_EXCEEDED'
-                            ? ' Demasiados lugares/alojamientos para una sola comparación.'
-                            : '';
-                    return toast(`Error al calcular distancias (${status}).${hint}`, 'error', 7000);
+        // La Distance Matrix API limita cada petición a 25 orígenes, 25 destinos y
+        // 100 elementos. Troceamos en lotes y combinamos la matriz de resultados.
+        const MAX_DIM = 25, MAX_ELEMS = 100;
+        const matrix = origins.map(() => new Array(destinations.length).fill(null));
+
+        try {
+            for (let oi = 0; oi < origins.length; oi += MAX_DIM) {
+                const oChunk = origins.slice(oi, oi + MAX_DIM);
+                const destPerReq = Math.max(1, Math.min(MAX_DIM, Math.floor(MAX_ELEMS / oChunk.length)));
+                for (let di = 0; di < destinations.length; di += destPerReq) {
+                    const dChunk = destinations.slice(di, di + destPerReq);
+                    const response = await new Promise((resolve, reject) => {
+                        service.getDistanceMatrix(
+                            { origins: oChunk, destinations: dChunk, travelMode: 'DRIVING', language: 'es' },
+                            (res, status) => status === 'OK' ? resolve(res) : reject(new Error(status))
+                        );
+                    });
+                    response.rows.forEach((row, r) => row.elements.forEach((el, c) => { matrix[oi + r][di + c] = el; }));
+                    await new Promise(r => setTimeout(r, 120));
                 }
-
-                const results = trip.accommodations.map((acc, i) => {
-                    const row = response.rows[i];
-                    const distances = row.elements.map((el, j) => ({
-                        poiId: trip.pois[j].id,
-                        poiName: trip.pois[j].name,
-                        durationSec: el.status === 'OK' ? el.duration.value : null,
-                        durationText: el.status === 'OK' ? el.duration.text : 'N/A',
-                        distanceText: el.status === 'OK' ? el.distance.text : 'N/A',
-                    }));
-
-                    const validDurations = distances.filter(d => d.durationSec !== null).map(d => d.durationSec);
-                    const avgDuration = validDurations.length > 0 ? validDurations.reduce((a, b) => a + b, 0) / validDurations.length : 0;
-                    const maxDuration = validDurations.length > 0 ? Math.max(...validDurations) : 0;
-
-                    // Weighted average considering visit frequency
-                    let weightedSum = 0, weightTotal = 0;
-                    distances.forEach((d, j) => {
-                        if (d.durationSec !== null) {
-                            const freq = trip.pois[j].visitFrequency || 1;
-                            weightedSum += d.durationSec * freq;
-                            weightTotal += freq;
-                        }
-                    });
-                    const weightedAvg = weightTotal > 0 ? weightedSum / weightTotal : 0;
-
-                    return {
-                        accommodationId: acc.id,
-                        name: acc.name,
-                        photoUrl: acc.photoUrl,
-                        distances,
-                        avgDuration,
-                        maxDuration,
-                        weightedAvg,
-                    };
-                });
-
-                // Rank by weighted average
-                results.sort((a, b) => a.weightedAvg - b.weightedAvg);
-                results.forEach((r, index) => r.rank = index + 1);
-
-                // Save distances to store
-                const distanceRecords = [];
-                results.forEach(r => {
-                    r.distances.forEach(d => {
-                        if (d.durationSec !== null) {
-                            distanceRecords.push({
-                                accommodationId: r.accommodationId,
-                                poiId: d.poiId,
-                                drivingDurationSeconds: d.durationSec,
-                            });
-                        }
-                    });
-                });
-                store.saveDistances(tripId, distanceRecords);
-                setComparisonResults(results);
-                setTab('compare');
             }
-        );
+        } catch (err) {
+            setComparing(false);
+            const status = err.message;
+            const hint = status === 'REQUEST_DENIED' ? ' Habilita "Distance Matrix API" en Google Cloud.' : '';
+            return toast(`Error al calcular distancias (${status}).${hint}`, 'error', 7000);
+        }
+
+        setComparing(false);
+
+        const results = trip.accommodations.map((acc, i) => {
+            const distances = trip.pois.map((poi, j) => {
+                const el = matrix[i][j];
+                const ok = el && el.status === 'OK';
+                return {
+                    poiId: poi.id,
+                    poiName: poi.name,
+                    durationSec: ok ? el.duration.value : null,
+                    durationText: ok ? el.duration.text : 'N/A',
+                    distanceText: ok ? el.distance.text : 'N/A',
+                };
+            });
+
+            const validDurations = distances.filter(d => d.durationSec !== null).map(d => d.durationSec);
+            const avgDuration = validDurations.length > 0 ? validDurations.reduce((a, b) => a + b, 0) / validDurations.length : 0;
+            const maxDuration = validDurations.length > 0 ? Math.max(...validDurations) : 0;
+
+            // Weighted average considering visit frequency
+            let weightedSum = 0, weightTotal = 0;
+            distances.forEach((d, j) => {
+                if (d.durationSec !== null) {
+                    const freq = trip.pois[j].visitFrequency || 1;
+                    weightedSum += d.durationSec * freq;
+                    weightTotal += freq;
+                }
+            });
+            const weightedAvg = weightTotal > 0 ? weightedSum / weightTotal : 0;
+
+            return {
+                accommodationId: acc.id,
+                name: acc.name,
+                photoUrl: acc.photoUrl,
+                distances,
+                avgDuration,
+                maxDuration,
+                weightedAvg,
+            };
+        });
+
+        // Rank by weighted average
+        results.sort((a, b) => a.weightedAvg - b.weightedAvg);
+        results.forEach((r, index) => r.rank = index + 1);
+
+        // Save distances to store
+        const distanceRecords = [];
+        results.forEach(r => {
+            r.distances.forEach(d => {
+                if (d.durationSec !== null) {
+                    distanceRecords.push({
+                        accommodationId: r.accommodationId,
+                        poiId: d.poiId,
+                        drivingDurationSeconds: d.durationSec,
+                    });
+                }
+            });
+        });
+        store.saveDistances(tripId, distanceRecords);
+        setComparisonResults(results);
+        setTab('compare');
     }, [trip, tripId, store]);
 
     // ===== MAP INIT =====
