@@ -40,9 +40,10 @@ async function getPlacesLib() {
   return window.google.maps.importLibrary('places');
 }
 
-function photoUrls(place, max = 6, maxWidthPx = 800) {
+function photoUrls(place, max = 6, maxWidth = 800) {
   if (!place.photos || place.photos.length === 0) return [];
-  return place.photos.slice(0, max).map((p) => p.getURI({ maxWidthPx }));
+  // La API nueva de Places usa { maxWidth, maxHeight } en getURI().
+  return place.photos.slice(0, max).map((p) => p.getURI({ maxWidth }));
 }
 
 // Convierte un `Place` de la API nueva a la forma que usa el resto de la app.

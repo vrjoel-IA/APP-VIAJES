@@ -130,7 +130,14 @@ export default function TripView() {
             { origins, destinations, travelMode: 'DRIVING', language: 'es' },
             (response, status) => {
                 setComparing(false);
-                if (status !== 'OK') return toast('Error al calcular distancias.', 'error');
+                if (status !== 'OK') {
+                    const hint = status === 'REQUEST_DENIED'
+                        ? ' Habilita "Distance Matrix API" en Google Cloud.'
+                        : status === 'MAX_ELEMENTS_EXCEEDED' || status === 'MAX_DIMENSIONS_EXCEEDED'
+                            ? ' Demasiados lugares/alojamientos para una sola comparación.'
+                            : '';
+                    return toast(`Error al calcular distancias (${status}).${hint}`, 'error', 7000);
+                }
 
                 const results = trip.accommodations.map((acc, i) => {
                     const row = response.rows[i];
