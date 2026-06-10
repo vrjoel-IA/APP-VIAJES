@@ -23,7 +23,11 @@ export async function generateAiItinerary(payload) {
     try {
       const body = await res.json();
       if (body?.error) msg = body.error;
-    } catch { /* respuesta no-JSON */ }
+      if (body?.detail) msg += ` — ${body.detail}`;
+    } catch {
+      // Respuesta no-JSON (p. ej. la función no existe aún o el deploy no terminó).
+      if (res.status === 404) msg = 'La función de IA no está disponible (404). ¿Terminó el deploy en Netlify?';
+    }
     throw new Error(msg);
   }
 
