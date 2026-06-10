@@ -46,7 +46,7 @@ function buildMapsUrl(startLoc, optimizedPois, endLoc) {
     return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${waypoints}&travelmode=driving`;
 }
 
-export default function ItineraryTab({ trip, store }) {
+export default function ItineraryTab({ trip, store, onShowOnMap }) {
     const [editingDay, setEditingDay] = useState(null);
     const [generating, setGenerating] = useState(false);
     const [editingItinerary, setEditingItinerary] = useState(null); // id of itinerary being edited
@@ -68,6 +68,7 @@ export default function ItineraryTab({ trip, store }) {
 
     // AI state
     const [aiLoading, setAiLoading] = useState(false);
+    const [aiInstructions, setAiInstructions] = useState(''); // indicaciones libres del usuario para la IA
     const [aiSuggestions, setAiSuggestions] = useState([]); // lugares nuevos sugeridos por la IA (resueltos con Google)
     const [aiEvents, setAiEvents] = useState([]); // fiestas/eventos locales detectados para las fechas del viaje
 
@@ -530,6 +531,7 @@ export default function ItineraryTab({ trip, store }) {
                 dayDate,
                 tripStart: trip.startDate || null,
                 tripEnd: trip.endDate || null,
+                instructions: aiInstructions.trim(),
                 startTime,
                 start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
                 end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
@@ -644,6 +646,14 @@ export default function ItineraryTab({ trip, store }) {
                         Elige solo el inicio, el fin y la hora. La IA seleccionará los mejores lugares de tu lista,
                         los ordenará por cercanía y te sugerirá sitios imprescindibles. Podrás editarlo después.
                     </p>
+                    <textarea
+                        className="input-field"
+                        rows={2}
+                        style={{ padding: '10px 12px', resize: 'vertical', marginBottom: '10px', fontSize: '13px' }}
+                        placeholder="Ideas o indicaciones (opcional): vamos con niños, prioriza playa, ritmo relajado, evita museos..."
+                        value={aiInstructions}
+                        onChange={e => setAiInstructions(e.target.value)}
+                    />
                     <button
                         className="btn btn-primary btn-full"
                         onClick={handleGenerateAI}
@@ -654,7 +664,22 @@ export default function ItineraryTab({ trip, store }) {
                 </div>
 
                 {/* POI selection with visit hours */}
-                <h3 className="text-body" style={{ fontWeight: 700, marginBottom: '4px' }}>O elígelos tú</h3>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '4px' }}>
+                    <h3 className="text-body" style={{ fontWeight: 700 }}>O elígelos tú</h3>
+                    {(() => {
+                        const activePois = trip.pois.filter(p => p.isActive !== false);
+                        const allSelected = activePois.length > 0 && activePois.every(p => selectedPois.includes(p.id));
+                        return (
+                            <button
+                                className="text-caption"
+                                style={{ color: 'var(--color-primary)', fontWeight: 700 }}
+                                onClick={() => setSelectedPois(allSelected ? [] : activePois.map(p => p.id))}
+                            >
+                                {allSelected ? 'Desmarcar todos' : 'Marcar todos'}
+                            </button>
+                        );
+                    })()}
+                </div>
                 <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
                     Selecciona los lugares e indica cuánto tiempo estimas. El itinerario incluirá almuerzo y cena automáticamente.
                 </p>
@@ -890,6 +915,16 @@ export default function ItineraryTab({ trip, store }) {
                                     </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 6 }}>
+                                    {/* Ver en el mapa de la app */}
+                                    {onShowOnMap && (
+                                        <button
+                                            style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-primary)', border: '1px solid var(--border-color)' }}
+                                            onClick={() => onShowOnMap(itinerary)}
+                                            title="Ver la ruta en el mapa"
+                                        >
+                                            <Map size={15} />
+                                        </button>
+                                    )}
                                     {/* Edit button */}
                                     <button
                                         style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-primary)', border: '1px solid var(--border-color)' }}

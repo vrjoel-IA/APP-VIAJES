@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import { useAuthStore } from './store/useAuthStore';
@@ -10,6 +10,7 @@ import Profile from './pages/Profile';
 import NewTrip from './pages/NewTrip';
 import TripView from './pages/TripView';
 import Login from './pages/Login';
+import ResetPassword from './pages/ResetPassword';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -52,6 +53,7 @@ const ProtectedRoute = ({ children }) => {
 
 export default function App() {
   const { setSession, loading } = useAuthStore();
+  const [recovery, setRecovery] = useState(false);
 
   useEffect(() => {
     // Verificar sesión inicial
@@ -62,7 +64,9 @@ export default function App() {
     // Escuchar cambios de auth
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // El usuario llegó desde el enlace de recuperación: pedir nueva contraseña.
+      if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setSession(session);
     });
 
@@ -71,6 +75,16 @@ export default function App() {
 
   if (loading) {
     return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: 'var(--color-primary)' }}>Iniciando aplicación...</div>;
+  }
+
+  // Intercepta antes de las rutas: si está en flujo de recuperación, fija nueva contraseña.
+  if (recovery) {
+    return (
+      <ErrorBoundary>
+        <ResetPassword onDone={() => setRecovery(false)} />
+        <Toaster />
+      </ErrorBoundary>
+    );
   }
 
   return (

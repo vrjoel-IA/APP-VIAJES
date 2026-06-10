@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     Search, Plus, MapPin, Trash2, Star, Clock, ExternalLink,
@@ -12,6 +12,7 @@ import BulkImportModal from '../components/BulkImportModal';
 import PoiDetailModal from '../components/PoiDetailModal';
 import AccommodationDetailModal from '../components/AccommodationDetailModal';
 import ShareTripModal from '../components/ShareTripModal';
+import RouteOverlay from '../components/RouteOverlay';
 import { useTripStore } from '../store/useTripStore';
 import { searchPlacesByText } from '../lib/places';
 import { toast } from '../lib/toast';
@@ -47,9 +48,20 @@ export default function TripView() {
     const [measureDest, setMeasureDest] = useState(null);
     const [measureMode, setMeasureMode] = useState('DRIVING');
     const [measureResult, setMeasureResult] = useState(null);
+    const [routeItinerary, setRouteItinerary] = useState(null); // itinerario a dibujar en el mapa
 
     const mapRef = useRef(null);
     const apiIsLoaded = useApiIsLoaded();
+
+    // Puntos ordenados de la ruta a dibujar en el mapa (inicio → paradas → fin).
+    const routeStops = useMemo(() => {
+        if (!routeItinerary) return [];
+        const pts = [];
+        if (routeItinerary.startLoc) pts.push({ lat: routeItinerary.startLoc.lat, lng: routeItinerary.startLoc.lng });
+        (routeItinerary.timeline || []).forEach(s => { if (s.lat != null && s.lng != null) pts.push({ lat: s.lat, lng: s.lng }); });
+        if (routeItinerary.endLoc) pts.push({ lat: routeItinerary.endLoc.lat, lng: routeItinerary.endLoc.lng });
+        return pts;
+    }, [routeItinerary]);
 
     useEffect(() => {
         if (!store.loading && !trip) navigate('/');
@@ -429,7 +441,7 @@ export default function TripView() {
                         onTilesLoaded={(e) => onMapLoad(e.map)}
                         style={{ width: '100%', height: '100%' }}
                     >
-                        {trip.pois.filter(p => p.isActive !== false).map(poi => (
+                        {!routeItinerary && trip.pois.filter(p => p.isActive !== false).map(poi => (
                             <AdvancedMarker
                                 key={poi.id}
                                 position={{ lat: poi.lat, lng: poi.lng }}
@@ -442,7 +454,7 @@ export default function TripView() {
                             </AdvancedMarker>
                         ))}
 
-                        {trip.accommodations.filter(a => a.isActive !== false).map(acc => (
+                        {!routeItinerary && trip.accommodations.filter(a => a.isActive !== false).map(acc => (
                             <AdvancedMarker
                                 key={acc.id}
                                 position={{ lat: acc.lat, lng: acc.lng }}
@@ -456,6 +468,47 @@ export default function TripView() {
                                 </div>
                             </AdvancedMarker>
                         ))}
+
+                        {/* Ruta del itinerario seleccionado (línea por carretera + paradas numeradas) */}
+                        {routeItinerary && routeStops.length >= 2 && (
+                            <RouteOverlay stops={routeStops} color="#256af4" />
+                        )}
+                        {routeItinerary?.startLoc && (
+                            <AdvancedMarker position={{ lat: routeItinerary.startLoc.lat, lng: routeItinerary.startLoc.lng }} title="Inicio">
+                                <div className="marker-custom" style={{ background: '#10b981' }}>🚗</div>
+                            </AdvancedMarker>
+                        )}
+                        {routeItinerary && (() => {
+                            let poiNum = 0;
+                            return (routeItinerary.timeline || [])
+                                .filter(s => s.lat != null && s.lng != null)
+                                .map((s, idx) => {
+                                    if (s.type === 'poi') {
+                                        poiNum += 1;
+                                        const num = poiNum;
+                                        return (
+                                            <AdvancedMarker
+                                                key={`r-${idx}`}
+                                                position={{ lat: s.lat, lng: s.lng }}
+                                                title={s.name}
+                                                onClick={() => setSelectedMarker(trip.pois.find(p => p.id === s.poiId) || s)}
+                                            >
+                                                <div className="marker-custom" style={{ background: 'var(--color-primary)' }}>{num}</div>
+                                            </AdvancedMarker>
+                                        );
+                                    }
+                                    return (
+                                        <AdvancedMarker key={`r-${idx}`} position={{ lat: s.lat, lng: s.lng }} title={s.name}>
+                                            <div className="marker-custom" style={{ background: '#f97316' }}>🍴</div>
+                                        </AdvancedMarker>
+                                    );
+                                });
+                        })()}
+                        {routeItinerary?.endLoc && (
+                            <AdvancedMarker position={{ lat: routeItinerary.endLoc.lat, lng: routeItinerary.endLoc.lng }} title="Fin">
+                                <div className="marker-custom" style={{ background: '#111827' }}>🏁</div>
+                            </AdvancedMarker>
+                        )}
 
                         {/* Info Window */}
                         {selectedMarker && (
@@ -482,6 +535,19 @@ export default function TripView() {
                             </InfoWindow>
                         )}
                     </Map>
+
+                    {/* Banner de la ruta del itinerario */}
+                    {routeItinerary && (
+                        <div className="card animate-fade-in-up" style={{
+                            position: 'absolute', top: '12px', left: '50%', transform: 'translateX(-50%)',
+                            zIndex: 10, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '10px',
+                            maxWidth: 'calc(100% - 24px)', boxShadow: '0 8px 30px rgba(0,0,0,0.15)'
+                        }}>
+                            <Navigation size={15} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
+                            <span style={{ fontWeight: 700, fontSize: '13px' }} className="truncate">Ruta: {routeItinerary.title}</span>
+                            <button onClick={() => setRouteItinerary(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', display: 'flex', flexShrink: 0 }}><X size={16} /></button>
+                        </div>
+                    )}
 
                     {/* Measure Overlay */}
                     {(measureSource || measureDest) && (
@@ -717,7 +783,7 @@ export default function TripView() {
             {/* ===== TAB: ITINERARY ===== */}
             {tab === 'itinerary' && (
                 <div className="tab-content" style={{ padding: 'var(--space-lg) var(--space-lg) calc(var(--nav-height) + 120px) var(--space-lg)' }}>
-                    <ItineraryTab trip={trip} store={store} />
+                    <ItineraryTab trip={trip} store={store} onShowOnMap={(it) => { setRouteItinerary(it); setTab('map'); }} />
                 </div>
             )}
 

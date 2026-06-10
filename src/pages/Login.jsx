@@ -9,10 +9,31 @@ export default function Login() {
     const navigate = useNavigate();
     const { setSession } = useAuthStore();
     const [isLogin, setIsLogin] = useState(true);
+    const [forgot, setForgot] = useState(false); // modo "recuperar contraseña"
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [info, setInfo] = useState(null);
+
+    const handleForgot = async (e) => {
+        e.preventDefault();
+        setError(null);
+        setInfo(null);
+        if (!email) return setError('Escribe tu correo electrónico.');
+        setLoading(true);
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(email, {
+                redirectTo: window.location.origin,
+            });
+            if (error) throw error;
+            setInfo('Te hemos enviado un correo con un enlace para restablecer tu contraseña. Revisa tu bandeja (y el spam).');
+        } catch (err) {
+            setError(err.message || 'No se pudo enviar el correo de recuperación.');
+        } finally {
+            setLoading(false);
+        }
+    };
 
     const handleAuth = async (e) => {
         e.preventDefault();
@@ -49,17 +70,25 @@ export default function Login() {
                     <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '56px', height: '56px', background: 'var(--color-primary-light)', color: 'var(--color-primary)', borderRadius: 'var(--radius-xl)', marginBottom: '16px' }}>
                         <Sparkles size={28} />
                     </div>
-                    <h1 className="text-title">{isLogin ? 'Bienvenido de nuevo' : 'Crea tu cuenta'}</h1>
+                    <h1 className="text-title">{forgot ? 'Recupera tu contraseña' : (isLogin ? 'Bienvenido de nuevo' : 'Crea tu cuenta')}</h1>
                     <p className="text-body text-secondary" style={{ marginTop: '8px' }}>
-                        {isLogin ? 'Inicia sesión para planificar y acceder a tus viajes mágicos.' : 'Regístrate para empezar a organizar tus aventuras.'}
+                        {forgot
+                            ? 'Te enviaremos un enlace a tu correo para restablecerla.'
+                            : (isLogin ? 'Inicia sesión para planificar y acceder a tus viajes mágicos.' : 'Regístrate para empezar a organizar tus aventuras.')}
                     </p>
                 </div>
 
-                <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
+                <form onSubmit={forgot ? handleForgot : handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
                     {error && (
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '12px', background: '#fee2e2', color: 'var(--color-danger)', borderRadius: 'var(--radius-md)', fontSize: '14px' }}>
                             <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
                             <span>{error}</span>
+                        </div>
+                    )}
+                    {info && (
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '12px', background: 'var(--color-primary-light)', color: 'var(--color-primary)', borderRadius: 'var(--radius-md)', fontSize: '14px' }}>
+                            <Mail size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <span>{info}</span>
                         </div>
                     )}
 
@@ -75,32 +104,55 @@ export default function Login() {
                         />
                     </div>
 
-                    <div className="input-group">
-                        <div className="input-icon"><Lock size={18} /></div>
-                        <input
-                            type="password"
-                            className="input-field"
-                            placeholder="Tu contraseña"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            required
-                            minLength={6}
-                        />
-                    </div>
+                    {!forgot && (
+                        <div className="input-group">
+                            <div className="input-icon"><Lock size={18} /></div>
+                            <input
+                                type="password"
+                                className="input-field"
+                                placeholder="Tu contraseña"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                required
+                                minLength={6}
+                            />
+                        </div>
+                    )}
+
+                    {isLogin && !forgot && (
+                        <button
+                            type="button"
+                            className="text-caption"
+                            style={{ color: 'var(--color-primary)', fontWeight: 600, textAlign: 'right' }}
+                            onClick={() => { setForgot(true); setError(null); setInfo(null); }}
+                        >
+                            ¿Olvidaste tu contraseña?
+                        </button>
+                    )}
 
                     <button type="submit" className="btn btn-primary" style={{ marginTop: '8px' }} disabled={loading}>
-                        {loading ? 'Cargando...' : (isLogin ? 'Iniciar Sesión' : 'Registrarse')}
+                        {loading ? 'Cargando...' : (forgot ? 'Enviar enlace' : (isLogin ? 'Iniciar Sesión' : 'Registrarse'))}
                     </button>
                 </form>
 
                 <div style={{ textAlign: 'center', marginTop: 'var(--space-xl)' }}>
-                    <button
-                        className="text-caption"
-                        style={{ color: 'var(--color-primary)', fontWeight: 600 }}
-                        onClick={() => { setIsLogin(!isLogin); setError(null); }}
-                    >
-                        {isLogin ? '¿No tienes cuenta? Regístrate gratis' : '¿Ya tienes cuenta? Inicia sesión'}
-                    </button>
+                    {forgot ? (
+                        <button
+                            className="text-caption"
+                            style={{ color: 'var(--color-primary)', fontWeight: 600 }}
+                            onClick={() => { setForgot(false); setError(null); setInfo(null); }}
+                        >
+                            ← Volver a iniciar sesión
+                        </button>
+                    ) : (
+                        <button
+                            className="text-caption"
+                            style={{ color: 'var(--color-primary)', fontWeight: 600 }}
+                            onClick={() => { setIsLogin(!isLogin); setError(null); }}
+                        >
+                            {isLogin ? '¿No tienes cuenta? Regístrate gratis' : '¿Ya tienes cuenta? Inicia sesión'}
+                        </button>
+                    )}
                 </div>
             </div>
         </div>
