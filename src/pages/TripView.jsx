@@ -14,7 +14,7 @@ import AccommodationDetailModal from '../components/AccommodationDetailModal';
 import ShareTripModal from '../components/ShareTripModal';
 import RouteOverlay from '../components/RouteOverlay';
 import { useTripStore } from '../store/useTripStore';
-import { searchPlacesByText } from '../lib/places';
+import { searchPlacesByText, getPlaceDetails } from '../lib/places';
 import { toast } from '../lib/toast';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
 import './TripView.css';
@@ -52,6 +52,20 @@ export default function TripView() {
 
     const mapRef = useRef(null);
     const apiIsLoaded = useApiIsLoaded();
+    const repairingPhotos = useRef(new Set());
+
+    // Auto-repara fotos rotas: vuelve a pedir la foto del lugar a Google (con el
+    // parámetro correcto) y actualiza el POI. Se ejecuta una vez por lugar.
+    const repairPhoto = useCallback(async (poi) => {
+        if (!apiIsLoaded || !poi?.placeId || repairingPhotos.current.has(poi.id)) return;
+        repairingPhotos.current.add(poi.id);
+        try {
+            const fresh = await getPlaceDetails(poi.placeId);
+            if (fresh?.photoUrl) {
+                store.updatePoi(trip.id, poi.id, { photoUrl: fresh.photoUrl, photos: fresh.photos });
+            }
+        } catch { /* sin foto disponible */ }
+    }, [apiIsLoaded, store, trip?.id]);
 
     // Puntos ordenados de la ruta a dibujar en el mapa (inicio → paradas → fin).
     const routeStops = useMemo(() => {
@@ -393,7 +407,7 @@ export default function TripView() {
                                         <img
                                             src={poi.photoUrl || getPlaceholderImage(poi.name)}
                                             alt={poi.name}
-                                            onError={(e) => { if (!e.currentTarget.dataset.fb) { e.currentTarget.dataset.fb = '1'; e.currentTarget.src = getPlaceholderImage(poi.name); } }}
+                                            onError={(e) => { if (!e.currentTarget.dataset.fb) { e.currentTarget.dataset.fb = '1'; e.currentTarget.src = getPlaceholderImage(poi.name); repairPhoto(poi); } }}
                                         />
                                     </div>
                                     <div className="poi-info">
