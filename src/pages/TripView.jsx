@@ -390,7 +390,11 @@ export default function TripView() {
                                     onClick={() => setPoiDetail(poi)}
                                 >
                                     <div className="poi-img">
-                                        <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt={poi.name} />
+                                        <img
+                                            src={poi.photoUrl || getPlaceholderImage(poi.name)}
+                                            alt={poi.name}
+                                            onError={(e) => { if (!e.currentTarget.dataset.fb) { e.currentTarget.dataset.fb = '1'; e.currentTarget.src = getPlaceholderImage(poi.name); } }}
+                                        />
                                     </div>
                                     <div className="poi-info">
                                         <h3 className="text-body" style={{ fontWeight: 700 }}>{poi.name}</h3>
