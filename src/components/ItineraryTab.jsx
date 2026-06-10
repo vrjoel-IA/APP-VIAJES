@@ -421,7 +421,10 @@ export default function ItineraryTab({ trip, store }) {
     // Construye el itinerario completo a partir del plan razonado de la IA:
     // geolocaliza paradas, resuelve restaurantes y calcula trayectos con Google.
     const buildAiItinerary = async (ai, startLoc, endLoc, candidates) => {
-        const candMap = new Map(candidates.map(c => [c.id, c]));
+        // OJO: en este archivo `Map` es el icono de lucide-react, no el Map de JS.
+        // Por eso usamos un objeto plano como índice de candidatos por id.
+        const candById = {};
+        candidates.forEach(c => { candById[c.id] = c; });
         const ds = new window.google.maps.DirectionsService();
         const timeline = [];
         const optimizedPois = [];
@@ -433,7 +436,7 @@ export default function ItineraryTab({ trip, store }) {
 
         for (const item of (ai.timeline || [])) {
             if (item.type === 'poi') {
-                const poi = candMap.get(item.poiId);
+                const poi = candById[item.poiId];
                 if (!poi) continue;
                 const hrs = item.durationMins ? item.durationMins / 60 : (VISIT_DURATION[poi.category] || 1.5);
                 timeline.push({
