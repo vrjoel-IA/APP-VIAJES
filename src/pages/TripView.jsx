@@ -64,6 +64,8 @@ export default function TripView() {
     const mapRef = useRef(null);
     const apiIsLoaded = useApiIsLoaded();
     const repairingPhotos = useRef(new Set());
+    const enrichingPhotos = useRef(new Set());
+    const enrichRunning = useRef(false);
 
     // Auto-repara fotos rotas: vuelve a pedir la foto del lugar a Google (con el
     // parámetro correcto) y actualiza el POI. Se ejecuta una vez por lugar.
@@ -77,6 +79,65 @@ export default function TripView() {
             }
         } catch { /* sin foto disponible */ }
     }, [apiIsLoaded, store, trip?.id]);
+
+    // Enriquece con fotos reales de Google los lugares que llegan sin foto (típico de la
+    // investigación importada). Con placeId pide detalles; sin él busca por nombre+municipio.
+    // También rellena rating, dirección, web, etc. si faltan. `photoTried` evita reintentos.
+    const enrichPhoto = useCallback(async (poi) => {
+        if (!apiIsLoaded || !trip || poi.photoUrl || poi.photoTried || enrichingPhotos.current.has(poi.id)) return;
+        enrichingPhotos.current.add(poi.id);
+        try {
+            let fresh = null;
+            if (poi.placeId) {
+                fresh = await getPlaceDetails(poi.placeId);
+            } else {
+                const bias = trip.destinationLat && trip.destinationLng
+                    ? { lat: trip.destinationLat, lng: trip.destinationLng } : null;
+                const q = [poi.name, poi.municipio].filter(Boolean).join(', ');
+                const results = await searchPlacesByText(q, { locationBias: bias, limit: 1 });
+                fresh = results[0] || null;
+            }
+            if (fresh && (fresh.photoUrl || fresh.placeId)) {
+                store.updatePoi(trip.id, poi.id, {
+                    photoUrl: fresh.photoUrl || poi.photoUrl || null,
+                    photos: fresh.photos?.length ? fresh.photos : (poi.photos || []),
+                    placeId: poi.placeId || fresh.placeId || null,
+                    rating: poi.rating ?? fresh.rating ?? null,
+                    userRatingsTotal: poi.userRatingsTotal ?? fresh.userRatingsTotal ?? null,
+                    address: poi.address || fresh.address || '',
+                    website: poi.website || fresh.website || null,
+                    phoneNumber: poi.phoneNumber || fresh.phoneNumber || null,
+                    openingHours: poi.openingHours || fresh.openingHours || null,
+                    photoTried: true,
+                });
+            } else {
+                store.updatePoi(trip.id, poi.id, { photoTried: true });
+            }
+        } catch {
+            // Sin resultado o API caída: se queda con el placeholder y no reintentamos en bucle.
+            store.updatePoi(trip.id, poi.id, { photoTried: true });
+        }
+    }, [apiIsLoaded, store, trip?.id, trip?.destinationLat, trip?.destinationLng]);
+
+    // Pase en segundo plano: recorre los lugares sin foto de uno en uno (respetando
+    // los límites de la API) y les pone la foto de Google. Un flag evita solaparse.
+    useEffect(() => {
+        if (!apiIsLoaded || !trip || enrichRunning.current) return;
+        const pending = trip.pois.filter(p =>
+            !p.photoUrl && !p.photoTried && !p.descartado && !enrichingPhotos.current.has(p.id));
+        if (pending.length === 0) return;
+        enrichRunning.current = true;
+        let cancelled = false;
+        (async () => {
+            for (const poi of pending) {
+                if (cancelled) break;
+                await enrichPhoto(poi);
+                await new Promise(r => setTimeout(r, 300));
+            }
+            enrichRunning.current = false;
+        })();
+        return () => { cancelled = true; enrichRunning.current = false; };
+    }, [apiIsLoaded, trip?.pois, enrichPhoto, trip]);
 
     // Puntos ordenados de la ruta a dibujar en el mapa (inicio → paradas → fin).
     const routeStops = useMemo(() => {
