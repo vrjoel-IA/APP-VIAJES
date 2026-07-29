@@ -4,7 +4,8 @@ import {
     Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X, Sparkles, Star, PartyPopper
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
-import { formatDuration } from '../utils/constants';
+import { formatDuration, CATEGORY_MAP } from '../utils/constants';
+import { haversineMeters } from '../lib/tripSchema';
 import { searchNearbyRestaurant } from '../lib/places';
 import { generateAiItinerary, resolveSuggestions } from '../lib/ai';
 import { toast } from '../lib/toast';
@@ -15,6 +16,7 @@ const VISIT_DURATION = {
     beach: 2.5,
     culture: 1.5,
     nature: 3.5,
+    mirador: 0.75,
     food: 1,
     other: 1,
 };
@@ -77,6 +79,57 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
         ...trip.accommodations.filter(a => a.isActive !== false).map(a => ({ ...a, type: 'accommodation', label: `🏨 ${a.name}` })),
         ...trip.pois.filter(p => p.isActive !== false).map(p => ({ ...p, type: 'poi', label: `📍 ${p.name}` }))
     ];
+
+    const poiById = (id) => trip.pois.find(p => p.id === id);
+
+    // Estimación rápida de un día-semilla (sin llamar a Google): tiempo de visita
+    // (duracion_estimada_min o un valor por categoría) + conducción en línea recta a 45 km/h.
+    const RECOMMENDED_DAY_MIN = 10 * 60; // 10 h de actividad = día cargado
+    const estimateSeedDay = (day) => {
+        const stops = (day.paradas || []).map(poiById).filter(Boolean);
+        const base = trip.accommodations.find(a => a.id === day.baseId)
+            || trip.accommodations.find(a => a.id === trip.selectedAccommodation)
+            || trip.accommodations.find(a => a.isActive !== false);
+        const visitMin = stops.reduce((sum, p) =>
+            sum + (p.duracionEstimadaMin || (VISIT_DURATION[p.category] || 1.5) * 60), 0);
+        const seq = [base, ...stops, base].filter(Boolean);
+        let driveMin = 0;
+        for (let i = 0; i < seq.length - 1; i++) {
+            const m = haversineMeters(seq[i], seq[i + 1]);
+            if (m !== Infinity) driveMin += (m / 1000) / 45 * 60;
+        }
+        const totalMin = visitMin + driveMin;
+        return { stops, visitMin, driveMin, totalMin, overBudget: totalMin > RECOMMENDED_DAY_MIN };
+    };
+
+    // Eventos del viaje que caen en la fecha de un día-semilla (para anclarlos y avisar).
+    const eventsForDay = (day) => {
+        if (!day.fecha) return [];
+        return (trip.eventos || []).filter(e => {
+            const ini = e.fechaInicio || e.fechaFin;
+            const fin = e.fechaFin || e.fechaInicio;
+            if (!ini) return false;
+            return day.fecha >= ini && day.fecha <= fin;
+        });
+    };
+
+    // Abre el planificador con las paradas del día-semilla ya seleccionadas.
+    const handlePlanSeedDay = (day) => {
+        setEditingDay(day.id);
+        setTitle(day.title || `Día ${day.dia || ''}`.trim());
+        const startPoint = day.baseId || trip.selectedAccommodation || '';
+        setStartId(startPoint);
+        setEndId(startPoint);
+        const validPois = (day.paradas || []).filter(id => trip.pois.some(p => p.id === id && p.isActive !== false));
+        setSelectedPois(validPois);
+        const vh = {};
+        validPois.forEach(id => { const p = poiById(id); if (p?.duracionEstimadaMin) vh[id] = Math.round(p.duracionEstimadaMin / 60 * 10) / 10; });
+        setVisitHours(vh);
+        setTravelModes({});
+        setMealTypes({});
+        setStartTime('09:00');
+        setEditingItinerary(null);
+    };
 
     const togglePoiSelection = (poiId) => {
         setSelectedPois(prev =>
@@ -900,6 +953,74 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
 
             <div>
                 {itineraries.map((itinerary) => {
+                    // Día-semilla (importado o creado desde el mapa): aún sin timeline calculada.
+                    const isSeed = itinerary.seed && !(itinerary.timeline && itinerary.timeline.length);
+                    if (isSeed) {
+                        const est = estimateSeedDay(itinerary);
+                        const dayEvents = eventsForDay(itinerary);
+                        return (
+                            <div key={itinerary.id} className="card" style={{ marginBottom: 'var(--space-md)', borderLeft: '3px solid var(--color-primary)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                                    <div>
+                                        <h3 style={{ fontWeight: 700, fontSize: '17px' }}>{itinerary.title || `Día ${itinerary.dia || ''}`}</h3>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                                            {itinerary.fecha && <span className="text-caption text-secondary">{itinerary.fecha}</span>}
+                                            <span className="text-caption" style={{ fontWeight: 700, color: est.overBudget ? 'var(--color-danger)' : 'var(--color-primary)' }}>
+                                                ~{formatDuration(est.totalMin * 60)} estimadas
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <button style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-danger)' }} onClick={() => deleteItinerary(itinerary.id)}>
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+
+                                {itinerary.notas && (
+                                    <p className="text-caption text-secondary" style={{ marginBottom: 10, lineHeight: 1.5, fontStyle: 'italic' }}>{itinerary.notas}</p>
+                                )}
+
+                                {/* Eventos anclados a la fecha del día */}
+                                {dayEvents.map(ev => (
+                                    <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', background: 'var(--color-gold-light)', border: '1px solid var(--color-gold)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginBottom: 8 }}>
+                                        <PartyPopper size={15} style={{ color: 'var(--color-gold)', flexShrink: 0, marginTop: 2 }} />
+                                        <div>
+                                            <div style={{ fontWeight: 700, fontSize: 13 }}>{ev.nombre}</div>
+                                            <div className="text-caption text-secondary">
+                                                {est.stops.length > 0
+                                                    ? 'Hay un evento este día: cuenta con desplazamientos y aparcamiento extra.'
+                                                    : (ev.notas || 'Evento en tus fechas.')}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+
+                                {/* Paradas del día */}
+                                {est.stops.length > 0 ? (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                                        {est.stops.map(p => (
+                                            <button key={p.id} onClick={() => setPoiDetail(p)}
+                                                className="chip" style={{ background: (CATEGORY_MAP[p.category]?.color || '#6b7280') + '20', color: CATEGORY_MAP[p.category]?.color || '#334155', border: 'none', cursor: 'pointer' }}>
+                                                {CATEGORY_MAP[p.category]?.emoji || '📍'} {p.name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-caption text-tertiary" style={{ marginBottom: 12 }}>Sin paradas todavía. Añádelas desde el mapa o el listado.</p>
+                                )}
+
+                                {est.overBudget && (
+                                    <p className="text-caption" style={{ color: 'var(--color-danger)', fontWeight: 700, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        ⚠️ Día muy cargado (más de 10 h). Considera mover alguna parada a otro día.
+                                    </p>
+                                )}
+
+                                <button className="btn btn-primary btn-full" onClick={() => handlePlanSeedDay(itinerary)} disabled={est.stops.length === 0}>
+                                    <Navigation size={16} /> Planificar horarios de este día
+                                </button>
+                            </div>
+                        );
+                    }
+
                     const mapsUrl = buildMapsUrl(itinerary.startLoc, itinerary.optimizedPois, itinerary.endLoc);
                     return (
                         <div key={itinerary.id} className="card" style={{ marginBottom: 'var(--space-md)' }}>

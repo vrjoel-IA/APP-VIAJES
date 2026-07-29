@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase';
 import { useAuthStore } from './store/useAuthStore';
 import NavBar from './components/NavBar';
 import Toaster from './components/Toast';
+import OfflineBanner from './components/OfflineBanner';
 import Explore from './pages/Explore';
 import MyTrips from './pages/MyTrips';
 import Profile from './pages/Profile';
@@ -89,6 +90,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <OfflineBanner />
       <BrowserRouter>
         <div className="app-layout">
           <Routes>

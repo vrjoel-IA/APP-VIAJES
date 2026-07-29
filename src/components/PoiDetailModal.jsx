@@ -1,16 +1,39 @@
 import { useState } from 'react';
 import {
     X, MapPin, Star, Navigation, Phone, Globe, Clock,
-    ChevronLeft, ChevronRight, Trash2, ExternalLink
+    ChevronLeft, ChevronRight, Trash2, ExternalLink,
+    Heart, CheckCircle2, Ban, Pencil, Timer, Sun
 } from 'lucide-react';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
 
 const PRICE_LABELS = ['Gratis', 'Económico', 'Moderado', 'Caro', 'Muy caro'];
 
+// Chip de estado con área de pulsación grande (uso en móvil con sol).
+function StatusChip({ active, activeColor, icon: Icon, label, onClick }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', minHeight: 40,
+                borderRadius: 'var(--radius-full)', cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                border: active ? 'none' : '1px solid var(--border-color)',
+                background: active ? activeColor : 'var(--bg-secondary)',
+                color: active ? 'white' : 'var(--text-secondary)',
+                WebkitTapHighlightColor: 'transparent',
+            }}
+        >
+            <Icon size={15} fill={active && Icon === Heart ? 'white' : 'none'} /> {label}
+        </button>
+    );
+}
+
 export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate }) {
     const [photoIdx, setPhotoIdx] = useState(0);
     const [showHours, setShowHours] = useState(false);
     const [isEditingCategory, setIsEditingCategory] = useState(false);
+    const [editing, setEditing] = useState(false);
+    const canEdit = typeof onUpdate === 'function';
 
     const photos = poi.photos?.length ? poi.photos : [poi.photoUrl || getPlaceholderImage(poi.name)];
     const catInfo = CATEGORY_MAP[poi.category] || { emoji: '📍', label: 'Lugar', color: '#6b7280' };
@@ -171,6 +194,91 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                             <span style={{ fontSize: '14px', fontWeight: 700, color: '#f5a623' }}>{poi.rating}</span>
                             {poi.userRatingsTotal && (
                                 <span className="text-caption text-tertiary">({poi.userRatingsTotal.toLocaleString()} reseñas)</span>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Estados de la investigación (grandes, para tocar con sol) */}
+                    {canEdit && (
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                            <StatusChip
+                                active={!!poi.imprescindible} activeColor="var(--color-primary)" icon={Heart}
+                                label="Imprescindible"
+                                onClick={() => onUpdate({ imprescindible: !poi.imprescindible })}
+                            />
+                            <StatusChip
+                                active={!!poi.yaVisitado} activeColor="var(--color-accent)" icon={CheckCircle2}
+                                label={poi.yaVisitado ? 'Ya visitado' : 'Marcar visitado'}
+                                onClick={() => onUpdate({ yaVisitado: !poi.yaVisitado })}
+                            />
+                            <StatusChip
+                                active={!!poi.descartado} activeColor="var(--color-danger)" icon={Ban}
+                                label={poi.descartado ? 'Descartado' : 'Descartar'}
+                                onClick={() => onUpdate({ descartado: !poi.descartado })}
+                            />
+                        </div>
+                    )}
+
+                    {/* Datos de la investigación (municipio, duración, mejor momento, notas) */}
+                    {(poi.municipio || poi.duracionEstimadaMin || poi.mejorMomento || poi.notas || canEdit) && (
+                        <div className="card" style={{ background: 'var(--bg-secondary)', marginBottom: 16, padding: 'var(--space-md)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: editing ? 12 : ((poi.municipio || poi.duracionEstimadaMin || poi.mejorMomento || poi.notas) ? 10 : 0) }}>
+                                <span className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)' }}>Notas del viaje</span>
+                                {canEdit && (
+                                    <button onClick={() => setEditing(e => !e)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-primary)', fontWeight: 700, fontSize: 12 }}>
+                                        <Pencil size={13} /> {editing ? 'Listo' : 'Editar'}
+                                    </button>
+                                )}
+                            </div>
+
+                            {editing ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <div style={{ flex: 1 }}>
+                                            <label className="field-label">Municipio</label>
+                                            <input className="input-field" style={{ padding: '10px 12px' }} value={poi.municipio || ''} onChange={e => onUpdate({ municipio: e.target.value })} placeholder="Tarifa" />
+                                        </div>
+                                        <div style={{ width: 130 }}>
+                                            <label className="field-label">Duración (min)</label>
+                                            <input className="input-field" type="number" min="0" step="15" style={{ padding: '10px 12px' }} value={poi.duracionEstimadaMin ?? ''} onChange={e => onUpdate({ duracionEstimadaMin: e.target.value === '' ? null : parseInt(e.target.value, 10) })} placeholder="120" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="field-label">Mejor momento</label>
+                                        <input className="input-field" style={{ padding: '10px 12px' }} value={poi.mejorMomento || ''} onChange={e => onUpdate({ mejorMomento: e.target.value })} placeholder="Mañana. Evitar levante fuerte." />
+                                    </div>
+                                    <div>
+                                        <label className="field-label">Notas</label>
+                                        <textarea className="input-field" rows={3} style={{ padding: '10px 12px', resize: 'vertical' }} value={poi.notas || ''} onChange={e => onUpdate({ notas: e.target.value })} placeholder="Aparcamiento, consejos, avisos..." />
+                                    </div>
+                                </div>
+                            ) : (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    {poi.municipio && (
+                                        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                            <MapPin size={15} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                                            <span className="text-body text-secondary">{poi.municipio}</span>
+                                        </div>
+                                    )}
+                                    {poi.duracionEstimadaMin > 0 && (
+                                        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                            <Timer size={15} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                                            <span className="text-body text-secondary">{formatDuration(poi.duracionEstimadaMin * 60)} de visita estimada</span>
+                                        </div>
+                                    )}
+                                    {poi.mejorMomento && (
+                                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                                            <Sun size={15} style={{ color: 'var(--color-gold)', flexShrink: 0, marginTop: 2 }} />
+                                            <span className="text-body text-secondary">{poi.mejorMomento}</span>
+                                        </div>
+                                    )}
+                                    {poi.notas && (
+                                        <p className="text-body text-secondary" style={{ lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{poi.notas}</p>
+                                    )}
+                                    {!poi.municipio && !poi.duracionEstimadaMin && !poi.mejorMomento && !poi.notas && (
+                                        <p className="text-caption text-tertiary">Sin notas todavía. Pulsa "Editar" para añadirlas.</p>
+                                    )}
+                                </div>
                             )}
                         </div>
                     )}

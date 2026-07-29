@@ -1,9 +1,48 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from './useAuthStore';
+import { saveCache, loadCache } from '../lib/tripCache';
+import { haversineMeters, namesSimilar } from '../lib/tripSchema';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+}
+
+// Rellena un POI con los campos nuevos del contrato si le faltan (migración idempotente).
+// Los datos antiguos, introducidos a mano, se marcan `fuente: 'manual'` sin perder nada.
+function normalizePoi(p) {
+  return {
+    ...p,
+    category: p.category || 'other',
+    municipio: p.municipio || '',
+    imprescindible: !!p.imprescindible,
+    yaVisitado: !!p.yaVisitado,
+    descartado: !!p.descartado,
+    duracionEstimadaMin: typeof p.duracionEstimadaMin === 'number' ? p.duracionEstimadaMin : null,
+    mejorMomento: p.mejorMomento || '',
+    notas: p.notas || '',
+    fuente: p.fuente || 'manual',
+  };
+}
+
+// Da a un viaje cargado la forma completa del nuevo esquema, sin perder nada de lo antiguo.
+function migrateTrip(t) {
+  return {
+    ...t,
+    pois: (t.pois || []).map(normalizePoi),
+    accommodations: t.accommodations || [],
+    eventos: t.eventos || [],
+    gastronomia: t.gastronomia || [],
+    logistica: t.logistica && typeof t.logistica === 'object' ? t.logistica : {},
+    seccionesGuia: t.seccionesGuia || [],
+    itineraries: t.itineraries || [],
+  };
+}
+
+// Aplica un mapa de reasignación de ids a una referencia (o null si no hay).
+function remapRef(ref, remap) {
+  if (!ref) return ref;
+  return remap[ref] || ref;
 }
 
 export function useTripStore() {
@@ -15,10 +54,17 @@ export function useTripStore() {
       setData({ trips: [], activeTrip: null, loading: false });
       return;
     }
-    setData(prev => ({ ...prev, loading: true }));
+
+    // Hidratar al instante desde la caché offline mientras Supabase responde.
+    const cached = loadCache(user.id);
+    if (cached) {
+      setData(prev => ({ ...prev, trips: cached.map(migrateTrip), loading: prev.trips.length === 0 ? true : false }));
+    } else {
+      setData(prev => ({ ...prev, loading: true }));
+    }
+
     try {
-      // Modify the select query: RLS in Supabase will filter the rows the user is allowed to see
-      // (either owner OR in shared_with array). We just ask for all allowed rows.
+      // RLS en Supabase filtra las filas que el usuario puede ver (propias o compartidas).
       const { data: dbTrips, error } = await supabase
         .from('trips')
         .select('*')
@@ -33,11 +79,17 @@ export function useTripStore() {
         }
         return Array.isArray(val) ? val : [];
       };
+      const safeParseObj = (val) => {
+        if (!val) return {};
+        if (typeof val === 'string') {
+          try { const o = JSON.parse(val); return o && typeof o === 'object' ? o : {}; } catch { return {}; }
+        }
+        return typeof val === 'object' && !Array.isArray(val) ? val : {};
+      };
 
-      // Parse JSON fields from Supabase
-      const parsedTrips = (dbTrips || []).map(t => ({
+      const parsedTrips = (dbTrips || []).map(t => migrateTrip({
         id: t.id,
-        userId: t.user_id, // Ensure we track the original creator
+        userId: t.user_id,
         name: t.name,
         destination: t.destination,
         destinationLat: t.destination_lat,
@@ -49,12 +101,19 @@ export function useTripStore() {
         distances: safeParse(t.distances),
         selectedAccommodation: t.selected_accommodation,
         sharedWith: safeParse(t.shared_with),
+        eventos: safeParse(t.eventos),
+        gastronomia: safeParse(t.gastronomia),
+        logistica: safeParseObj(t.logistica),
+        seccionesGuia: safeParse(t.secciones_guia),
+        itineraries: safeParse(t.itinerarios),
         createdAt: t.created_at,
       }));
 
+      saveCache(user.id, parsedTrips);
       setData(prev => ({ ...prev, trips: parsedTrips, loading: false }));
     } catch (error) {
       console.error('Error loading trips:', error);
+      // Sin conexión: si hay caché, seguimos con ella; si no, dejamos de cargar igualmente.
       setData(prev => ({ ...prev, loading: false }));
     }
   }, [user]);
@@ -65,9 +124,11 @@ export function useTripStore() {
 
   const saveTripsToDb = async (tripsToSave) => {
     if (!user) return;
-    const dbFormat = tripsToSave.map(t => ({
+    // Columnas base (siempre existen) y columnas nuevas (requieren la migración
+    // supabase/migrations/20260729_add_trip_store_columns.sql).
+    const baseRow = (t) => ({
       id: t.id,
-      user_id: t.userId || user.id, // Use original creator ID if it exists, otherwise use current user
+      user_id: t.userId || user.id,
       name: t.name,
       destination: t.destination,
       destination_lat: t.destinationLat,
@@ -79,14 +140,48 @@ export function useTripStore() {
       distances: t.distances,
       selected_accommodation: t.selectedAccommodation,
       shared_with: t.sharedWith || [],
-    }));
+    });
+    const fullRow = (t) => ({
+      ...baseRow(t),
+      eventos: t.eventos || [],
+      gastronomia: t.gastronomia || [],
+      logistica: t.logistica || {},
+      secciones_guia: t.seccionesGuia || [],
+      itinerarios: t.itineraries || [],
+    });
+
+    // ¿El error viene de que aún no existen las columnas nuevas? (migración pendiente)
+    const isMissingColumn = (error) => {
+      const msg = `${error?.message || ''} ${error?.details || ''}`.toLowerCase();
+      return error?.code === '42703' || error?.code === 'PGRST204' ||
+        ['eventos', 'gastronomia', 'logistica', 'secciones_guia', 'itinerarios']
+          .some(c => msg.includes(c) && msg.includes('column'));
+    };
 
     try {
-      const { error } = await supabase.from('trips').upsert(dbFormat);
+      const { error } = await supabase.from('trips').upsert(tripsToSave.map(fullRow));
       if (error) throw error;
     } catch (error) {
-      console.error('Error saving trip to Supabase:', error);
+      if (isMissingColumn(error)) {
+        // Migración pendiente: guardamos solo las columnas base para no perder datos.
+        // Los campos nuevos siguen en la caché local y en el jsonb `pois`.
+        console.warn('Columnas nuevas de trips no encontradas: aplica la migración de Supabase. Guardando solo columnas base.');
+        try {
+          const { error: e2 } = await supabase.from('trips').upsert(tripsToSave.map(baseRow));
+          if (e2) throw e2;
+        } catch (e2) {
+          console.error('Error saving trip to Supabase:', e2);
+        }
+      } else {
+        console.error('Error saving trip to Supabase:', error);
+      }
     }
+  };
+
+  // Guarda un trip actualizado en estado + Supabase + caché, en un solo sitio.
+  const persistTrip = (newTrips, updatedTrip) => {
+    if (updatedTrip) saveTripsToDb([updatedTrip]);
+    if (user) saveCache(user.id, newTrips);
   };
 
   // ---- TRIPS ----
@@ -105,24 +200,34 @@ export function useTripStore() {
       distances: [],
       selectedAccommodation: null,
       sharedWith: [],
+      eventos: [],
+      gastronomia: [],
+      logistica: {},
+      seccionesGuia: [],
+      itineraries: [],
       createdAt: new Date().toISOString(),
     };
 
-    await saveTripsToDb([newTrip]); // Guardar a DB y esperar confirmación
+    await saveTripsToDb([newTrip]);
 
     setData(prev => {
       const newTrips = [...prev.trips, newTrip];
+      if (user) saveCache(user.id, newTrips);
       return { ...prev, trips: newTrips, activeTrip: newTrip.id };
     });
     return newTrip.id;
   }, [user]);
 
   const deleteTrip = useCallback(async (tripId) => {
-    setData(prev => ({
-      ...prev,
-      trips: prev.trips.filter(t => t.id !== tripId),
-      activeTrip: prev.activeTrip === tripId ? null : prev.activeTrip,
-    }));
+    setData(prev => {
+      const newTrips = prev.trips.filter(t => t.id !== tripId);
+      if (user) saveCache(user.id, newTrips);
+      return {
+        ...prev,
+        trips: newTrips,
+        activeTrip: prev.activeTrip === tripId ? null : prev.activeTrip,
+      };
+    });
     if (user) {
       await supabase.from('trips').delete().eq('id', tripId).eq('user_id', user.id);
     }
@@ -140,7 +245,97 @@ export function useTripStore() {
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, ...updates } : t);
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
+      return { ...prev, trips: newTrips };
+    });
+  }, [user]);
+
+  // ---- IMPORTAR investigación (JSON del contrato ya convertido a interno) ----
+  // internal: salida de importToInternal(). mode: 'merge' | 'replace'.
+  // dedupe (solo merge): 'skip' omite lugares/bases duplicados por cercanía (<200m) y
+  // nombre similar; 'both' los añade todos.
+  const importTripData = useCallback((tripId, internal, { mode = 'merge', dedupe = 'skip' } = {}) => {
+    setData(prev => {
+      const newTrips = prev.trips.map(t => {
+        if (t.id !== tripId) return t;
+
+        if (mode === 'replace') {
+          return {
+            ...t,
+            destination: internal.meta?.destino || t.destination,
+            startDate: internal.meta?.startDate || t.startDate,
+            endDate: internal.meta?.endDate || t.endDate,
+            pois: internal.pois,
+            accommodations: internal.accommodations,
+            selectedAccommodation: internal.selectedAccommodation || null,
+            eventos: internal.eventos,
+            gastronomia: internal.gastronomia,
+            logistica: internal.logistica || {},
+            seccionesGuia: internal.seccionesGuia,
+            itineraries: internal.itineraries,
+            distances: [],
+          };
+        }
+
+        // ----- MERGE con dedupe -----
+        const remap = {};
+        const DEDUPE_M = 200;
+
+        const mergedPois = [...t.pois];
+        internal.pois.forEach(np => {
+          const dup = dedupe === 'skip' && t.pois.find(ep =>
+            haversineMeters(ep, np) < DEDUPE_M && namesSimilar(ep.name, np.name));
+          if (dup) { remap[np.id] = dup.id; }
+          else { mergedPois.push(np); }
+        });
+
+        const mergedAccs = [...t.accommodations];
+        internal.accommodations.forEach(na => {
+          const dup = dedupe === 'skip' && t.accommodations.find(ea =>
+            haversineMeters(ea, na) < DEDUPE_M && namesSimilar(ea.name, na.name));
+          if (dup) { remap[na.id] = dup.id; }
+          else { mergedAccs.push(na); }
+        });
+
+        // Reescribe referencias de lo importado a los ids finales (por si hubo dedupe).
+        const eventos = internal.eventos.map(e => ({ ...e, lugarId: remapRef(e.lugarId, remap) }));
+        const secciones = internal.seccionesGuia.map(s => ({
+          ...s,
+          lugaresRelacionados: (s.lugaresRelacionados || []).map(id => remapRef(id, remap)),
+        }));
+        const itineraries = internal.itineraries.map(it => ({
+          ...it,
+          baseId: remapRef(it.baseId, remap),
+          paradas: (it.paradas || []).map(id => remapRef(id, remap)),
+        }));
+
+        // Fusiona logística concatenando sus listas.
+        const mergeList = (a, b) => [...(a || []), ...(b || [])];
+        const logistica = {
+          ...t.logistica,
+          transporte: mergeList(t.logistica?.transporte, internal.logistica?.transporte),
+          apps: mergeList(t.logistica?.apps, internal.logistica?.apps),
+          avisos: mergeList(t.logistica?.avisos, internal.logistica?.avisos),
+        };
+
+        return {
+          ...t,
+          destination: t.destination || internal.meta?.destino || '',
+          startDate: t.startDate || internal.meta?.startDate || null,
+          endDate: t.endDate || internal.meta?.endDate || null,
+          pois: mergedPois,
+          accommodations: mergedAccs,
+          selectedAccommodation: t.selectedAccommodation || internal.selectedAccommodation || null,
+          eventos: [...(t.eventos || []), ...eventos],
+          gastronomia: [...(t.gastronomia || []), ...internal.gastronomia],
+          logistica,
+          seccionesGuia: [...(t.seccionesGuia || []), ...secciones],
+          itineraries: [...(t.itineraries || []), ...itineraries],
+        };
+      });
+
+      const updatedTrip = newTrips.find(t => t.id === tripId);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -151,11 +346,11 @@ export function useTripStore() {
       const emailLower = email.toLowerCase().trim();
       const newTrips = prev.trips.map(t => {
         if (t.id !== tripId) return t;
-        if ((t.sharedWith || []).includes(emailLower)) return t; // Already shared
+        if ((t.sharedWith || []).includes(emailLower)) return t;
         return { ...t, sharedWith: [...(t.sharedWith || []), emailLower] };
       });
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -168,7 +363,7 @@ export function useTripStore() {
         return { ...t, sharedWith: (t.sharedWith || []).filter(e => e !== emailLower) };
       });
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -183,16 +378,26 @@ export function useTripStore() {
       lat: poi.lat,
       lng: poi.lng,
       address: poi.address || '',
+      municipio: poi.municipio || '',
       rating: poi.rating || null,
       photoUrl: poi.photoUrl || null,
+      photos: poi.photos || [],
       visitFrequency: poi.visitFrequency || 1,
       openingHours: poi.openingHours || null,
+      // Campos del contrato (opcionales, con default):
+      imprescindible: !!poi.imprescindible,
+      yaVisitado: !!poi.yaVisitado,
+      descartado: !!poi.descartado,
+      duracionEstimadaMin: typeof poi.duracionEstimadaMin === 'number' ? poi.duracionEstimadaMin : null,
+      mejorMomento: poi.mejorMomento || '',
+      notas: poi.notas || '',
+      fuente: poi.fuente || 'manual',
       addedAt: new Date().toISOString(),
     };
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, pois: [...t.pois, newPoi] } : t);
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
     return newPoi.id;
@@ -202,14 +407,11 @@ export function useTripStore() {
     setData(prev => {
       const newTrips = prev.trips.map(t =>
         t.id === tripId
-          ? {
-            ...t,
-            pois: t.pois.map(p => p.id === poiId ? { ...p, ...updates } : p)
-          }
+          ? { ...t, pois: t.pois.map(p => p.id === poiId ? { ...p, ...updates } : p) }
           : t
       );
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -218,14 +420,11 @@ export function useTripStore() {
     setData(prev => {
       const newTrips = prev.trips.map(t =>
         t.id === tripId
-          ? {
-            ...t,
-            pois: t.pois.map(p => p.id === poiId ? { ...p, isActive: p.isActive === false ? true : false } : p)
-          }
+          ? { ...t, pois: t.pois.map(p => p.id === poiId ? { ...p, isActive: p.isActive === false ? true : false } : p) }
           : t
       );
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -242,7 +441,7 @@ export function useTripStore() {
           : t
       );
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -258,12 +457,14 @@ export function useTripStore() {
       pricePerNight: acc.pricePerNight || null,
       placeId: acc.placeId || null,
       photoUrl: acc.photoUrl || null,
+      notas: acc.notas || '',
+      fuente: acc.fuente || 'manual',
       addedAt: new Date().toISOString(),
     };
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, accommodations: [...t.accommodations, newAcc] } : t);
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
     return newAcc.id;
@@ -282,7 +483,7 @@ export function useTripStore() {
           : t
       );
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -291,14 +492,11 @@ export function useTripStore() {
     setData(prev => {
       const newTrips = prev.trips.map(t =>
         t.id === tripId
-          ? {
-            ...t,
-            accommodations: t.accommodations.map(a => a.id === accId ? { ...a, isActive: a.isActive === false ? true : false } : a)
-          }
+          ? { ...t, accommodations: t.accommodations.map(a => a.id === accId ? { ...a, isActive: a.isActive === false ? true : false } : a) }
           : t
       );
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -307,7 +505,7 @@ export function useTripStore() {
     setData(prev => {
       const newTrips = prev.trips.map(t => t.id === tripId ? { ...t, selectedAccommodation: accId } : t);
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -325,7 +523,7 @@ export function useTripStore() {
         return { ...t, distances: [...existing, ...distanceRecords] };
       });
       const updatedTrip = newTrips.find(t => t.id === tripId);
-      if (updatedTrip) saveTripsToDb([updatedTrip]);
+      persistTrip(newTrips, updatedTrip);
       return { ...prev, trips: newTrips };
     });
   }, [user]);
@@ -339,6 +537,7 @@ export function useTripStore() {
     deleteTrip,
     setActiveTrip,
     updateTrip,
+    importTripData,
     shareTrip,
     removeCollaborator,
     addPoi,

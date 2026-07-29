@@ -4,6 +4,7 @@ export const CATEGORIES = [
     { id: 'monument', label: 'Monumentos', emoji: '🗽', color: '#6366f1' },
     { id: 'theme_park', label: 'Parque temático', emoji: '🎢', color: '#ec4899' },
     { id: 'activity', label: 'Actividad', emoji: '🧗‍♂️', color: '#f43f5e' },
+    { id: 'mirador', label: 'Miradores', emoji: '🔭', color: '#0ea5e9' },
     { id: 'market', label: 'Mercados', emoji: '🛍️', color: '#f59e0b' },
     { id: 'airport', label: 'Aeropuertos', emoji: '✈️', color: '#64748b' },
     { id: 'food', label: 'Comida', emoji: '🍽️', color: '#f97316' },
@@ -33,11 +34,24 @@ export function formatDate(dateStr) {
     });
 }
 
-// Placeholder image
+// Placeholder image: SVG en data-URI, autocontenido. Funciona SIN conexión (no depende
+// de un servicio externo) y respeta la CSP (img-src permite data:). Muestra la inicial
+// del lugar sobre un degradado estable según el nombre.
 export function getPlaceholderImage(seed) {
-    const colors = ['3b82f6', '8b5cf6', '10b981', 'f97316', 'ec4899', '06b6d4'];
-    const c = colors[Math.abs(hashCode(seed || 'x')) % colors.length];
-    return `https://placehold.co/400x300/${c}/white?text=${encodeURIComponent(seed || '📍')}`;
+    const palettes = [
+        ['#3b82f6', '#1d4ed8'], ['#8b5cf6', '#6d28d9'], ['#10b981', '#047857'],
+        ['#f97316', '#c2410c'], ['#ec4899', '#be185d'], ['#06b6d4', '#0e7490'],
+    ];
+    const text = (seed || '📍').trim();
+    const [c1, c2] = palettes[Math.abs(hashCode(text)) % palettes.length];
+    // Inicial(es): primera letra, o dos si el nombre tiene varias palabras cortas.
+    const initial = text.replace(/[^\p{L}\p{N} ]/gu, '').trim().charAt(0).toUpperCase() || '•';
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs>
+<rect width="400" height="300" fill="url(#g)"/>
+<text x="200" y="165" font-family="system-ui,sans-serif" font-size="120" font-weight="700" fill="#ffffff" fill-opacity="0.9" text-anchor="middle">${initial}</text>
+</svg>`;
+    return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function hashCode(str) {

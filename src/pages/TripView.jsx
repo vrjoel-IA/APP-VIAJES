@@ -3,17 +3,20 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
     Search, Plus, MapPin, Trash2, Star, Clock, ExternalLink,
     Hotel, BarChart3, Map as MapIcon, List, X, Navigation, Heart,
-    CheckCircle2, ChevronDown, ChevronUp, Trophy, ArrowRight, UserPlus
+    CheckCircle2, ChevronDown, ChevronUp, Trophy, ArrowRight, UserPlus, Download, BookOpen
 } from 'lucide-react';
 import { Map, AdvancedMarker, InfoWindow, useApiIsLoaded } from '@vis.gl/react-google-maps';
 import PageHeader from '../components/PageHeader';
 import ItineraryTab from '../components/ItineraryTab';
+import GuideTab from '../components/GuideTab';
 import BulkImportModal from '../components/BulkImportModal';
+import ImportTripModal from '../components/ImportTripModal';
 import PoiDetailModal from '../components/PoiDetailModal';
 import AccommodationDetailModal from '../components/AccommodationDetailModal';
 import ShareTripModal from '../components/ShareTripModal';
 import RouteOverlay from '../components/RouteOverlay';
 import { useTripStore } from '../store/useTripStore';
+import { exportFromInternal, haversineMeters } from '../lib/tripSchema';
 import { searchPlacesByText, getPlaceDetails } from '../lib/places';
 import { toast } from '../lib/toast';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
@@ -34,12 +37,20 @@ export default function TripView() {
     const [searchResults, setSearchResults] = useState([]);
     const [searchLoading, setSearchLoading] = useState(false);
     const [activeFilter, setActiveFilter] = useState('all');
+    const [poiSearch, setPoiSearch] = useState('');
+    const [sortBy, setSortBy] = useState('alpha'); // alpha | distance | duration
+    const [onlyImprescindible, setOnlyImprescindible] = useState(false);
+    const [hideVisitados, setHideVisitados] = useState(false);
+    const [showDescartados, setShowDescartados] = useState(false);
     const [selectedMarker, setSelectedMarker] = useState(null);
     const [poiDetail, setPoiDetail] = useState(null);
     const [comparing, setComparing] = useState(false);
     const [comparisonResults, setComparisonResults] = useState(null);
+    const [weightEssentialOnly, setWeightEssentialOnly] = useState(false);
     const [showBulkImport, setShowBulkImport] = useState(false);
+    const [showImportTrip, setShowImportTrip] = useState(false);
     const [accDetail, setAccDetail] = useState(null);
+    const [dayPickerPoi, setDayPickerPoi] = useState(null); // POI que se está añadiendo a un día
     const [mapCenter, setMapCenter] = useState({
         lat: trip?.destinationLat || 28.2916,
         lng: trip?.destinationLng || -16.6291,
@@ -134,11 +145,23 @@ export default function TripView() {
     // ===== COMPARISON =====
     const runComparison = useCallback(async () => {
         if (!trip || trip.accommodations.length === 0 || trip.pois.length === 0) return;
+
+        // Lugares a comparar: nunca los descartados; opcionalmente solo los imprescindibles.
+        const notDiscarded = trip.pois.filter(p => !p.descartado);
+        let comparePois = weightEssentialOnly ? notDiscarded.filter(p => p.imprescindible) : notDiscarded;
+        if (comparePois.length === 0) {
+            return toast(
+                weightEssentialOnly
+                    ? 'No hay lugares marcados como imprescindibles. Marca alguno o desactiva esa opción.'
+                    : 'No hay lugares que comparar.',
+                'info', 5000
+            );
+        }
         setComparing(true);
 
         const service = new window.google.maps.DistanceMatrixService();
         const origins = trip.accommodations.map(a => new window.google.maps.LatLng(a.lat, a.lng));
-        const destinations = trip.pois.map(p => new window.google.maps.LatLng(p.lat, p.lng));
+        const destinations = comparePois.map(p => new window.google.maps.LatLng(p.lat, p.lng));
 
         // La Distance Matrix API limita cada petición a 25 orígenes, 25 destinos y
         // 100 elementos. Troceamos en lotes y combinamos la matriz de resultados.
@@ -171,7 +194,7 @@ export default function TripView() {
         setComparing(false);
 
         const results = trip.accommodations.map((acc, i) => {
-            const distances = trip.pois.map((poi, j) => {
+            const distances = comparePois.map((poi, j) => {
                 const el = matrix[i][j];
                 const ok = el && el.status === 'OK';
                 return {
@@ -187,11 +210,12 @@ export default function TripView() {
             const avgDuration = validDurations.length > 0 ? validDurations.reduce((a, b) => a + b, 0) / validDurations.length : 0;
             const maxDuration = validDurations.length > 0 ? Math.max(...validDurations) : 0;
 
-            // Weighted average considering visit frequency
+            // Media ponderada: los imprescindibles pesan más; también la frecuencia de visita.
             let weightedSum = 0, weightTotal = 0;
             distances.forEach((d, j) => {
                 if (d.durationSec !== null) {
-                    const freq = trip.pois[j].visitFrequency || 1;
+                    const poi = comparePois[j];
+                    const freq = (poi.visitFrequency || 1) * (poi.imprescindible ? 2 : 1);
                     weightedSum += d.durationSec * freq;
                     weightTotal += freq;
                 }
@@ -229,7 +253,7 @@ export default function TripView() {
         store.saveDistances(tripId, distanceRecords);
         setComparisonResults(results);
         setTab('compare');
-    }, [trip, tripId, store]);
+    }, [trip, tripId, store, weightEssentialOnly]);
 
     // ===== MAP INIT =====
     const onMapLoad = useCallback((map) => {
@@ -243,9 +267,29 @@ export default function TripView() {
     if (store.loading) return <div className="page-content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', fontWeight: 800, color: 'var(--color-primary)' }}>Cargando viaje...</div>;
     if (!trip) return null;
 
-    const filteredPois = activeFilter === 'all'
-        ? trip.pois
-        : trip.pois.filter(p => p.category === activeFilter);
+    // Base activa: el campamento base fijado, o el primer alojamiento activo.
+    const activeBase = trip.selectedAccommodation
+        ? trip.accommodations.find(a => a.id === trip.selectedAccommodation)
+        : trip.accommodations.find(a => a.isActive !== false);
+
+    // Distancia en km (línea recta) de un lugar a la base activa. Sin API: haversine.
+    const distanceToBase = (poi) =>
+        activeBase && poi.lat != null ? haversineMeters(activeBase, poi) : Infinity;
+
+    const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const q = normalize(poiSearch.trim());
+
+    const filteredPois = trip.pois
+        .filter(p => showDescartados ? true : !p.descartado)
+        .filter(p => activeFilter === 'all' ? true : p.category === activeFilter)
+        .filter(p => onlyImprescindible ? p.imprescindible : true)
+        .filter(p => hideVisitados ? !p.yaVisitado : true)
+        .filter(p => !q || normalize(p.name).includes(q) || normalize(p.municipio).includes(q) || normalize(p.notas).includes(q))
+        .sort((a, b) => {
+            if (sortBy === 'distance') return distanceToBase(a) - distanceToBase(b);
+            if (sortBy === 'duration') return (b.duracionEstimadaMin || 0) - (a.duracionEstimadaMin || 0);
+            return a.name.localeCompare(b.name, 'es');
+        });
 
     // ===== PLACES SEARCH =====
     const handleSearch = async () => {
@@ -312,6 +356,61 @@ export default function TripView() {
         store.selectAccommodation(tripId, accId);
     };
 
+    // Días-semilla del itinerario (día + lista de paradas). El motor rico los expande luego.
+    const seedDays = (trip?.itineraries || []).filter(it => it.seed);
+
+    // Añade un lugar a un día (semilla). dayId === 'new' crea un día nuevo.
+    const addPoiToDay = (poi, dayId) => {
+        const list = trip.itineraries || [];
+        let updated;
+        if (dayId === 'new') {
+            const maxDia = list.reduce((m, it) => Math.max(m, it.dia || 0), 0);
+            const dia = maxDia + 1;
+            updated = [...list, {
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                seed: true, dia, fecha: null,
+                baseId: trip.selectedAccommodation || null,
+                paradas: [poi.id], title: `Día ${dia}`, notas: '',
+            }];
+            toast(`"${poi.name}" añadido al Día ${dia}.`, 'success');
+        } else {
+            updated = list.map(it => {
+                if (it.id !== dayId) return it;
+                if ((it.paradas || []).includes(poi.id)) { toast('Ese lugar ya estaba en el día.', 'info'); return it; }
+                toast(`"${poi.name}" añadido a ${it.title || 'el día'}.`, 'success');
+                return { ...it, paradas: [...(it.paradas || []), poi.id] };
+            });
+        }
+        store.updateTrip(tripId, { itineraries: updated });
+        setDayPickerPoi(null);
+    };
+
+    // Centra el mapa en un lugar y abre su marcador (usado desde la Guía).
+    const showPoiOnMap = (poi) => {
+        if (poi.lat == null) return;
+        setRouteItinerary(null);
+        setSelectedMarker(poi);
+        setMapCenter({ lat: poi.lat, lng: poi.lng });
+        if (mapRef.current) mapRef.current.panTo({ lat: poi.lat, lng: poi.lng });
+        setTab('map');
+    };
+
+    // Exporta el viaje completo al JSON del contrato y lo descarga.
+    const handleExport = () => {
+        const json = exportFromInternal(trip);
+        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const slug = (trip.destination || trip.name || 'viaje').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        a.href = url;
+        a.download = `viaje-${slug || 'export'}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast('Viaje exportado a JSON.', 'success');
+    };
+
 
 
     const TABS = [
@@ -320,6 +419,7 @@ export default function TripView() {
         { id: 'hotels', label: 'Alojamiento', icon: Hotel },
         { id: 'compare', label: 'Comparar', icon: BarChart3 },
         { id: 'itinerary', label: 'Itinerario', icon: Navigation },
+        { id: 'guide', label: 'Guía', icon: BookOpen },
     ];
 
     return (
@@ -329,12 +429,22 @@ export default function TripView() {
                 subtitle={trip.destination}
                 onBack={() => navigate('/')}
                 rightAction={
-                    <button
-                        onClick={() => setShowShareModal(true)}
-                        style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-secondary)', padding: '8px 12px', borderRadius: 'var(--radius-full)', color: 'var(--color-primary)', fontWeight: 600, fontSize: '14px', border: '1px solid var(--color-primary-light)' }}
-                    >
-                        <UserPlus size={16} /> Compartir
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <button
+                            onClick={handleExport}
+                            title="Exportar el viaje a un archivo JSON"
+                            aria-label="Exportar viaje a JSON"
+                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '38px', height: '38px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-full)', color: 'var(--color-primary)', border: '1px solid var(--color-primary-light)' }}
+                        >
+                            <Download size={16} />
+                        </button>
+                        <button
+                            onClick={() => setShowShareModal(true)}
+                            style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-secondary)', padding: '8px 12px', borderRadius: 'var(--radius-full)', color: 'var(--color-primary)', fontWeight: 600, fontSize: '14px', border: '1px solid var(--color-primary-light)' }}
+                        >
+                            <UserPlus size={16} /> Compartir
+                        </button>
+                    </div>
                 }
             />
 
@@ -355,6 +465,9 @@ export default function TripView() {
                         {t.id === 'hotels' && trip.accommodations.length > 0 && (
                             <span className="tab-badge">{trip.accommodations.length}</span>
                         )}
+                        {t.id === 'guide' && (trip.seccionesGuia?.length > 0) && (
+                            <span className="tab-badge">{trip.seccionesGuia.length}</span>
+                        )}
                     </button>
                 ))}
             </div>
@@ -362,7 +475,24 @@ export default function TripView() {
             {/* ===== TAB: PLACES ===== */}
             {tab === 'places' && (
                 <div className="tab-content">
-                    <div className="chip-row" style={{ padding: '0 var(--space-lg)', marginBottom: 'var(--space-md)' }}>
+                    {/* Buscador por texto */}
+                    <div style={{ padding: '0 var(--space-lg)', marginBottom: 'var(--space-sm)' }}>
+                        <div className="input-group">
+                            <div className="input-icon"><Search size={18} /></div>
+                            <input
+                                className="input-field"
+                                value={poiSearch}
+                                onChange={e => setPoiSearch(e.target.value)}
+                                placeholder="Buscar por nombre, municipio o notas..."
+                            />
+                            {poiSearch && (
+                                <button onClick={() => setPoiSearch('')} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={18} /></button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Filtros por categoría */}
+                    <div className="chip-row" style={{ padding: '0 var(--space-lg)', marginBottom: 'var(--space-sm)' }}>
                         <button className={`chip ${activeFilter === 'all' ? 'active' : ''}`} onClick={() => setActiveFilter('all')}>
                             📍 Todo
                         </button>
@@ -373,10 +503,35 @@ export default function TripView() {
                         ))}
                     </div>
 
+                    {/* Filtros de estado + orden */}
+                    <div className="chip-row" style={{ padding: '0 var(--space-lg)', marginBottom: 'var(--space-md)', alignItems: 'center' }}>
+                        <button className={`chip ${onlyImprescindible ? 'active' : ''}`} onClick={() => setOnlyImprescindible(v => !v)}>
+                            ❤️ Imprescindibles
+                        </button>
+                        <button className={`chip ${hideVisitados ? 'active' : ''}`} onClick={() => setHideVisitados(v => !v)}>
+                            ✅ Ocultar visitados
+                        </button>
+                        <button className={`chip ${showDescartados ? 'active' : ''}`} onClick={() => setShowDescartados(v => !v)}>
+                            🚫 Ver descartados
+                        </button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
+                            <span className="text-caption text-tertiary">Orden:</span>
+                            <select
+                                value={sortBy}
+                                onChange={e => setSortBy(e.target.value)}
+                                style={{ padding: '6px 8px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-color)', fontSize: 12, background: 'var(--bg-primary)', cursor: 'pointer', fontWeight: 600 }}
+                            >
+                                <option value="alpha">Alfabético</option>
+                                <option value="distance" disabled={!activeBase}>Distancia a la base</option>
+                                <option value="duration">Duración</option>
+                            </select>
+                        </div>
+                    </div>
+
                     {/* POI List */}
                     <div className="poi-list stagger" style={{ padding: '0 var(--space-lg)' }}>
                         {filteredPois.map(poi => (
-                            <div key={poi.id} className="poi-item card animate-fade-in-up">
+                            <div key={poi.id} className="poi-item card animate-fade-in-up" style={{ opacity: poi.descartado ? 0.55 : 1 }}>
                                 <button
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
@@ -411,8 +566,11 @@ export default function TripView() {
                                         />
                                     </div>
                                     <div className="poi-info">
-                                        <h3 className="text-body" style={{ fontWeight: 700 }}>{poi.name}</h3>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                                        <h3 className="text-body" style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                            {poi.imprescindible && <Heart size={13} fill="var(--color-primary)" color="var(--color-primary)" style={{ flexShrink: 0 }} />}
+                                            <span className="truncate">{poi.name}</span>
+                                        </h3>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
                                             <span className="cat-dot" style={{ background: CATEGORY_MAP[poi.category]?.color || '#6b7280' }}></span>
                                             <span className="text-caption text-secondary">{CATEGORY_MAP[poi.category]?.label || 'Otro'}</span>
                                             {poi.rating && (
@@ -420,7 +578,26 @@ export default function TripView() {
                                                     <Star size={12} fill="#f5a623" /> {poi.rating}
                                                 </span>
                                             )}
+                                            {poi.yaVisitado && (
+                                                <span className="text-caption" style={{ display: 'flex', alignItems: 'center', gap: '2px', color: 'var(--color-accent)', fontWeight: 700 }}>
+                                                    <CheckCircle2 size={12} /> Visitado
+                                                </span>
+                                            )}
                                         </div>
+                                        {(activeBase && distanceToBase(poi) !== Infinity || poi.duracionEstimadaMin > 0) && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
+                                                {activeBase && distanceToBase(poi) !== Infinity && (
+                                                    <span className="text-caption text-tertiary" style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                                        <Navigation size={11} /> {(distanceToBase(poi) / 1000).toFixed(distanceToBase(poi) < 10000 ? 1 : 0)} km
+                                                    </span>
+                                                )}
+                                                {poi.duracionEstimadaMin > 0 && (
+                                                    <span className="text-caption text-tertiary" style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                                        <Clock size={11} /> {formatDuration(poi.duracionEstimadaMin * 60)}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
 
@@ -434,7 +611,11 @@ export default function TripView() {
                     {filteredPois.length === 0 && (
                         <div className="empty-state">
                             <Search size={48} />
-                            <p className="text-body text-tertiary">Añade lugares que quieras visitar</p>
+                            {trip.pois.length === 0 ? (
+                                <p className="text-body text-tertiary">Aún no hay lugares. Importa tu investigación o añade el primero con los botones de abajo.</p>
+                            ) : (
+                                <p className="text-body text-tertiary">Ningún lugar coincide con los filtros. Prueba a limpiarlos.</p>
+                            )}
                         </div>
                     )}
 
@@ -463,9 +644,16 @@ export default function TripView() {
                             <button
                                 className="btn btn-outline"
                                 style={{ width: '100%', borderRadius: 'var(--radius-full)', background: 'rgba(255,255,255,0.95)' }}
+                                onClick={() => setShowImportTrip(true)}
+                            >
+                                📥 Importar investigación (JSON)
+                            </button>
+                            <button
+                                className="text-caption text-secondary"
+                                style={{ width: '100%', padding: '4px', background: 'transparent' }}
                                 onClick={() => setShowBulkImport(true)}
                             >
-                                📋 Importar Lista de Lugares
+                                o pegar una lista de lugares en texto
                             </button>
                         </div>
                     )}
@@ -484,7 +672,7 @@ export default function TripView() {
                         onTilesLoaded={(e) => onMapLoad(e.map)}
                         style={{ width: '100%', height: '100%' }}
                     >
-                        {!routeItinerary && trip.pois.filter(p => p.isActive !== false).map(poi => (
+                        {!routeItinerary && trip.pois.filter(p => p.isActive !== false && !p.descartado).map(poi => (
                             <AdvancedMarker
                                 key={poi.id}
                                 position={{ lat: poi.lat, lng: poi.lng }}
@@ -569,6 +757,11 @@ export default function TripView() {
                                             if (selectedMarker.placeId && !selectedMarker.category) setAccDetail(selectedMarker);
                                             else setPoiDetail(selectedMarker);
                                         }}>Ver Detalles</button>
+                                        {selectedMarker.category && (
+                                            <button className="btn btn-accent" style={{ padding: '4px 8px', fontSize: '11px', width: '100%', borderRadius: '4px' }} onClick={() => { setDayPickerPoi(selectedMarker); setSelectedMarker(null); }}>
+                                                + Añadir a un día
+                                            </button>
+                                        )}
                                         <div style={{ display: 'flex', gap: '4px' }}>
                                             <button className="btn btn-outline" style={{ padding: '4px 6px', fontSize: '10px', flex: 1, borderRadius: '4px' }} onClick={() => setMeasureSource(selectedMarker)}>Desde aquí</button>
                                             <button className="btn btn-outline" style={{ padding: '4px 6px', fontSize: '10px', flex: 1, borderRadius: '4px' }} onClick={() => setMeasureDest(selectedMarker)}>Hasta aquí</button>
@@ -691,7 +884,9 @@ export default function TripView() {
                     {trip.accommodations.length === 0 && (
                         <div className="empty-state" style={{ marginTop: 'var(--space-xl)' }}>
                             <Hotel size={48} />
-                            <p className="text-body text-tertiary">Aún no has añadido alojamientos</p>
+                            <p className="text-body text-tertiary">
+                                Añade uno o varios alojamientos candidatos y te diré cuál queda mejor situado. También llegan al importar tu investigación.
+                            </p>
                         </div>
                     )}
 
@@ -700,6 +895,23 @@ export default function TripView() {
                             <Plus size={16} /> Añadir Alojamiento
                         </button>
                     </div>
+
+                    {trip.accommodations.length >= 1 && trip.pois.length >= 1 && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 'var(--space-lg)', padding: '12px 14px', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>
+                            <input
+                                type="checkbox"
+                                checked={weightEssentialOnly}
+                                onChange={e => setWeightEssentialOnly(e.target.checked)}
+                                style={{ width: 20, height: 20, accentColor: 'var(--color-primary)', flexShrink: 0 }}
+                            />
+                            <span>
+                                <span style={{ fontWeight: 700, fontSize: 14, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                    <Heart size={14} fill="var(--color-primary)" color="var(--color-primary)" /> Comparar solo con imprescindibles
+                                </span>
+                                <span className="text-caption text-secondary">Ignora los sitios lejanos que no piensas visitar.</span>
+                            </span>
+                        </label>
+                    )}
 
                     {trip.accommodations.length >= 1 && trip.pois.length >= 1 && (
                         <button
@@ -827,6 +1039,18 @@ export default function TripView() {
             {tab === 'itinerary' && (
                 <div className="tab-content" style={{ padding: 'var(--space-lg) var(--space-lg) calc(var(--nav-height) + 120px) var(--space-lg)' }}>
                     <ItineraryTab trip={trip} store={store} onShowOnMap={(it) => { setRouteItinerary(it); setTab('map'); }} />
+                </div>
+            )}
+
+            {/* ===== TAB: GUÍA ===== */}
+            {tab === 'guide' && (
+                <div className="tab-content">
+                    <GuideTab
+                        trip={trip}
+                        onOpenPoi={(poi) => setPoiDetail(poi)}
+                        onShowOnMap={showPoiOnMap}
+                        onAddToDay={(poi) => setDayPickerPoi(poi)}
+                    />
                 </div>
             )}
 
@@ -974,6 +1198,56 @@ export default function TripView() {
             )}
 
             {showBulkImport && <BulkImportModal tripId={tripId} addPoi={store.addPoi} onClose={() => setShowBulkImport(false)} />}
+
+            {showImportTrip && (
+                <ImportTripModal
+                    tripId={tripId}
+                    trip={trip}
+                    importTripData={store.importTripData}
+                    onClose={() => setShowImportTrip(false)}
+                />
+            )}
+
+            {/* Selector: añadir un lugar a un día del itinerario */}
+            {dayPickerPoi && (
+                <div className="modal-overlay animate-fade-in" onClick={() => setDayPickerPoi(null)}>
+                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 380 }}>
+                        <div className="modal-header">
+                            <div>
+                                <h2 className="text-subtitle">Añadir a un día</h2>
+                                <p className="text-caption text-secondary truncate" style={{ marginTop: 2, maxWidth: 260 }}>{dayPickerPoi.name}</p>
+                            </div>
+                            <button onClick={() => setDayPickerPoi(null)} className="modal-close"><X size={22} /></button>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {seedDays.length === 0 && (
+                                <p className="text-caption text-secondary" style={{ marginBottom: 4 }}>
+                                    Aún no tienes días planificados. Crea el primero:
+                                </p>
+                            )}
+                            {seedDays.map(day => {
+                                const already = (day.paradas || []).includes(dayPickerPoi.id);
+                                return (
+                                    <button
+                                        key={day.id}
+                                        className="btn btn-outline"
+                                        style={{ justifyContent: 'space-between', opacity: already ? 0.55 : 1 }}
+                                        disabled={already}
+                                        onClick={() => addPoiToDay(dayPickerPoi, day.id)}
+                                    >
+                                        <span>{day.title || `Día ${day.dia}`}</span>
+                                        <span className="text-caption text-tertiary">{already ? 'ya incluido' : `${(day.paradas || []).length} paradas`}</span>
+                                    </button>
+                                );
+                            })}
+                            <button className="btn btn-primary" onClick={() => addPoiToDay(dayPickerPoi, 'new')}>
+                                <Plus size={16} /> Crear un día nuevo con este lugar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div >
     );
 }
