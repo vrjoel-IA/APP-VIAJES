@@ -4,7 +4,7 @@ import {
     ChevronLeft, ChevronRight, Trash2, ExternalLink,
     Heart, CheckCircle2, Ban, Pencil, Timer, Sun, Circle,
     Map as MapIconLucide, Car, Footprints, Bus,
-    FileText, Sparkles, Eye, Lightbulb, Ticket, Accessibility, AlertCircle
+    FileText, Sparkles, Eye, Lightbulb, Ticket, Accessibility, AlertCircle, Info
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
@@ -15,7 +15,7 @@ const PRICE_LABELS = ['Gratis', 'Económico', 'Moderado', 'Caro', 'Muy caro'];
 
 // Iconos por tipo de bloque de notas (los nombres los produce notesFormat.js).
 const NOTE_ICONS = {
-    FileText, Sparkles, Eye, Lightbulb, Clock, Ticket, Timer, Sun, Accessibility, AlertCircle,
+    FileText, Sparkles, Eye, Lightbulb, Clock, Ticket, Timer, Sun, Accessibility, AlertCircle, Info,
 };
 
 // Los cuatro estados posibles de un lugar (mutuamente excluyentes).
@@ -344,11 +344,22 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate,
                                                 const BlockIcon = NOTE_ICONS[block.icon] || FileText;
                                                 return (
                                                     <div key={block.key + i}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                                                             <BlockIcon size={14} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
                                                             <span className="text-caption" style={{ fontWeight: 800, color: 'var(--text-primary)' }}>{block.label}</span>
                                                         </div>
-                                                        <p className="text-body text-secondary" style={{ lineHeight: 1.55, whiteSpace: 'pre-wrap', margin: 0 }}>{block.body}</p>
+                                                        {block.pairs ? (
+                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 4 }}>
+                                                                {block.pairs.map((p, j) => (
+                                                                    <div key={j} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                                                                        <span className="text-caption" style={{ fontWeight: 700, color: 'var(--text-secondary)', flexShrink: 0 }}>{p.k}:</span>
+                                                                        <span className="text-caption text-secondary" style={{ minWidth: 0 }}>{p.v}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        ) : (
+                                                            <p className="text-body text-secondary" style={{ lineHeight: 1.55, whiteSpace: 'pre-wrap', margin: 0 }}>{block.body}</p>
+                                                        )}
                                                     </div>
                                                 );
                                             })}

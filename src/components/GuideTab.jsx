@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { BookOpen, ChevronDown, Map as MapIcon, CalendarPlus, Star } from 'lucide-react';
 import { renderMarkdown } from '../lib/miniMarkdown';
+import { researchToMarkdown } from '../lib/notesFormat';
 import { CATEGORY_MAP, getPlaceholderImage } from '../utils/constants';
 
 // Vista Guía: renderiza `secciones_guia` como documento navegable e interactivo.
@@ -15,7 +16,9 @@ export default function GuideTab({ trip, onOpenPoi, onShowOnMap, onAddToDay }) {
     // HTML de cada sección (memorizado para no re-parsear en cada render).
     const htmlBySection = useMemo(() => {
         const map = {};
-        secciones.forEach(s => { map[s.id] = renderMarkdown(s.contenidoMd); });
+        // Normaliza el texto denso de investigación a Markdown antes de renderizarlo,
+        // así la guía se lee por bloques y no como un párrafo gigante.
+        secciones.forEach(s => { map[s.id] = renderMarkdown(researchToMarkdown(s.contenidoMd)); });
         return map;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [secciones.map(s => s.id + (s.contenidoMd?.length || 0)).join(',')]);
