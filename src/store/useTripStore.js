@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useAuthStore } from './useAuthStore';
 import { saveCache, loadCache } from '../lib/tripCache';
 import { haversineMeters, namesSimilar } from '../lib/tripSchema';
+import { guessCategory, shouldAutoClassify } from '../lib/categorize';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
@@ -11,9 +12,17 @@ function generateId() {
 // Rellena un POI con los campos nuevos del contrato si le faltan (migración idempotente).
 // Los datos antiguos, introducidos a mano, se marcan `fuente: 'manual'` sin perder nada.
 function normalizePoi(p) {
+  // Reclasificación automática (idempotente): si el lugar cae en 'other'/'culture' o no
+  // tiene categoría y el usuario no la ha fijado a mano, intentamos algo más específico.
+  // Nunca degradamos 'culture' -> 'other': solo mejoramos.
+  let category = p.category || 'other';
+  if (shouldAutoClassify(p)) {
+    const guess = guessCategory({ name: p.name, types: p.types, notas: p.notas });
+    if (guess !== 'other') category = guess;
+  }
   return {
     ...p,
-    category: p.category || 'other',
+    category,
     municipio: p.municipio || '',
     imprescindible: !!p.imprescindible,
     yaVisitado: !!p.yaVisitado,
@@ -375,15 +384,25 @@ export function useTripStore() {
       name: poi.name,
       placeId: poi.placeId || null,
       category: poi.category || 'other',
+      categoryLocked: !!poi.categoryLocked,
       lat: poi.lat,
       lng: poi.lng,
       address: poi.address || '',
       municipio: poi.municipio || '',
       rating: poi.rating || null,
+      userRatingsTotal: poi.userRatingsTotal || null,
       photoUrl: poi.photoUrl || null,
       photos: poi.photos || [],
       visitFrequency: poi.visitFrequency || 1,
       openingHours: poi.openingHours || null,
+      // Información útil de Google que conviene conservar (teléfono, web, reservas...):
+      website: poi.website || null,
+      phoneNumber: poi.phoneNumber || null,
+      priceLevel: poi.priceLevel ?? null,
+      types: poi.types || [],
+      reservas: poi.reservas || null,
+      reservaUrl: poi.reservaUrl || null,
+      requiereCita: poi.requiereCita ?? null,
       // Campos del contrato (opcionales, con default):
       imprescindible: !!poi.imprescindible,
       yaVisitado: !!poi.yaVisitado,
@@ -511,16 +530,20 @@ export function useTripStore() {
   }, [user]);
 
   // ---- DISTANCES ----
+  // Guarda registros de distancia por (accommodationId, poiId) FUSIONANDO campos: así
+  // el cálculo perezoso de andando/transporte no borra el tiempo en coche ya guardado
+  // (y viceversa). Cada registro puede traer solo los campos de un modo.
   const saveDistances = useCallback((tripId, distanceRecords) => {
     setData(prev => {
       const newTrips = prev.trips.map(t => {
         if (t.id !== tripId) return t;
-        const existing = t.distances.filter(d =>
-          !distanceRecords.some(nr =>
-            nr.accommodationId === d.accommodationId && nr.poiId === d.poiId
-          )
-        );
-        return { ...t, distances: [...existing, ...distanceRecords] };
+        const merged = [...(t.distances || [])];
+        distanceRecords.forEach(nr => {
+          const idx = merged.findIndex(d => d.accommodationId === nr.accommodationId && d.poiId === nr.poiId);
+          if (idx >= 0) merged[idx] = { ...merged[idx], ...nr };
+          else merged.push(nr);
+        });
+        return { ...t, distances: merged };
       });
       const updatedTrip = newTrips.find(t => t.id === tripId);
       persistTrip(newTrips, updatedTrip);

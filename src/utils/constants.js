@@ -1,14 +1,25 @@
+// Taxonomía de categorías. Los `id` NO deben cambiar: se persisten en cada POI y en
+// Supabase. Se pueden añadir categorías nuevas al final sin romper datos existentes.
+// `culture` se mantiene por compatibilidad (datos antiguos) pero la clasificación nueva
+// prefiere las categorías específicas: monument, museo, pueblo, ciudad, etc.
 export const CATEGORIES = [
+    { id: 'monument', label: 'Monumentos', emoji: '🏛️', color: '#6366f1' },
+    { id: 'museo', label: 'Museos', emoji: '🖼️', color: '#256af4' },
+    { id: 'pueblo', label: 'Pueblos', emoji: '🏘️', color: '#14b8a6' },
+    { id: 'ciudad', label: 'Ciudades', emoji: '🌆', color: '#0891b2' },
     { id: 'beach', label: 'Playas', emoji: '🏖️', color: '#10b981' },
-    { id: 'culture', label: 'Cultura', emoji: '🏛️', color: '#256af4' },
-    { id: 'monument', label: 'Monumentos', emoji: '🗽', color: '#6366f1' },
-    { id: 'theme_park', label: 'Parque temático', emoji: '🎢', color: '#ec4899' },
-    { id: 'activity', label: 'Actividad', emoji: '🧗‍♂️', color: '#f43f5e' },
     { id: 'mirador', label: 'Miradores', emoji: '🔭', color: '#0ea5e9' },
-    { id: 'market', label: 'Mercados', emoji: '🛍️', color: '#f59e0b' },
-    { id: 'airport', label: 'Aeropuertos', emoji: '✈️', color: '#64748b' },
-    { id: 'food', label: 'Comida', emoji: '🍽️', color: '#f97316' },
     { id: 'nature', label: 'Naturaleza', emoji: '🌿', color: '#8b5cf6' },
+    { id: 'ruta', label: 'Rutas', emoji: '🥾', color: '#84cc16' },
+    { id: 'experiencia', label: 'Experiencias', emoji: '🎟️', color: '#f43f5e' },
+    { id: 'shopping', label: 'Compras', emoji: '🛍️', color: '#f59e0b' },
+    { id: 'food', label: 'Gastronomía', emoji: '🍽️', color: '#f97316' },
+    { id: 'ocio', label: 'Ocio', emoji: '🎡', color: '#ec4899' },
+    { id: 'theme_park', label: 'Parque temático', emoji: '🎢', color: '#d946ef' },
+    { id: 'activity', label: 'Actividad', emoji: '🧗‍♂️', color: '#ef4444' },
+    { id: 'culture', label: 'Cultura', emoji: '🎭', color: '#8b5cf6' },
+    { id: 'market', label: 'Mercados', emoji: '🥕', color: '#eab308' },
+    { id: 'airport', label: 'Aeropuertos', emoji: '✈️', color: '#64748b' },
     { id: 'other', label: 'Otros', emoji: '📍', color: '#6b7280' },
 ];
 

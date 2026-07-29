@@ -465,8 +465,50 @@
     top: 0;
     z-index: 20;
     background: var(--bg-secondary);
-    padding-bottom: var(--space-sm);
+    padding: var(--space-sm) 0;
+    margin: calc(-1 * var(--space-sm)) 0 var(--space-md);
+    /* Sangrado a los bordes del contenedor para que el fondo tape el contenido al hacer scroll. */
+    margin-left: calc(-1 * var(--space-lg));
+    margin-right: calc(-1 * var(--space-lg));
+    padding-left: var(--space-lg);
+    padding-right: var(--space-lg);
+}
+
+/* Tarjeta de sección de la guía: bloques claros, fáciles de escanear. */
+.guide-section-card {
+    padding: var(--space-lg);
+    margin-bottom: var(--space-lg);
+}
+
+.guide-section-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     margin-bottom: var(--space-md);
+    padding-bottom: var(--space-sm);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.guide-section-index {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-full);
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.guide-section-title {
+    font-size: 18px;
+    font-weight: 800;
+    line-height: 1.25;
+    color: var(--text-primary);
+    min-width: 0;
 }
 
 .guide-index-toggle {
@@ -560,12 +602,36 @@
 }
 
 .guide-md blockquote {
-    border-left: 3px solid var(--color-primary);
-    background: var(--color-primary-light);
+    border-left: 3px solid var(--color-gold);
+    background: var(--color-gold-light);
     padding: 10px 14px;
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     margin: 0 0 var(--space-md);
     color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Sin margen superior en el primer elemento (la cabecera de la tarjeta ya separa). */
+.guide-md > :first-child { margin-top: 0; }
+
+.guide-md strong { color: var(--text-primary); font-weight: 700; }
+
+/* Encabezados internos con un acento sutil para escanear de un vistazo. */
+.guide-md h2,
+.guide-md h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.guide-md h2::before,
+.guide-md h3::before {
+    content: "";
+    width: 4px;
+    height: 1em;
+    border-radius: 2px;
+    background: var(--color-primary);
+    flex-shrink: 0;
 }
 
 .guide-place-card {

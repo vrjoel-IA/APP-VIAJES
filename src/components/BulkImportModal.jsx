@@ -3,25 +3,7 @@ import { X, Plus, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { searchPlacesByText } from '../lib/places';
 import { toast } from '../lib/toast';
-
-
-// Mapping keywords → category
-const KEYWORD_CATEGORY = {
-    playa: 'beach', beach: 'beach', costa: 'beach', cala: 'beach', mar: 'beach',
-    pueblo: 'culture', ciudad: 'culture', barrio: 'culture', casco: 'culture', villa: 'culture',
-    museo: 'culture', monumento: 'culture', catedral: 'culture', iglesia: 'culture', cultura: 'culture',
-    comida: 'food', restaurante: 'food', gastronomia: 'food', mercado: 'food',
-    excursion: 'nature', naturaleza: 'nature', montaña: 'nature', parque: 'nature',
-    senderismo: 'nature', ruta: 'nature', bosque: 'nature', volcan: 'nature', picos: 'nature',
-};
-
-function guessCategory(headerLine) {
-    const normalized = headerLine.toLowerCase().replace(/[^a-záéíóú\s]/g, '');
-    for (const [keyword, cat] of Object.entries(KEYWORD_CATEGORY)) {
-        if (normalized.includes(keyword)) return cat;
-    }
-    return 'other';
-}
+import { guessCategory } from '../lib/categorize';
 
 function parseList(text) {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -31,9 +13,11 @@ function parseList(text) {
     for (const line of lines) {
         // Detect category headers: —, -, #, *
         if (/^[—\-#*]/.test(line)) {
-            currentCat = guessCategory(line.replace(/^[—\-#*\s]+/, ''));
+            // La cabecera describe la categoría del bloque (el nombre real se resuelve luego).
+            currentCat = guessCategory({ name: line.replace(/^[—\-#*\s]+/, '') });
         } else {
-            entries.push({ name: line, category: currentCat });
+            // Categoría provisional por el nombre; se afinará con los `types` de Google al resolver.
+            entries.push({ name: line, category: guessCategory({ name: line }) !== 'other' ? guessCategory({ name: line }) : currentCat });
         }
     }
     return entries;
@@ -64,10 +48,13 @@ export default function BulkImportModal({ tripId, addPoi, onClose }) {
                 const matches = await searchPlacesByText(entry.name, { limit: 1 });
                 const place = matches[0];
                 if (place) {
+                    // Afina la categoría con los `types` reales de Google; si no aportan
+                    // señal, se queda la categoría deducida del texto de la lista.
+                    const byGoogle = guessCategory({ name: place.name, types: place.types });
                     addPoi(tripId, {
                         name: place.name,
                         placeId: place.placeId,
-                        category: entry.category,
+                        category: byGoogle !== 'other' ? byGoogle : entry.category,
                         lat: place.lat,
                         lng: place.lng,
                         address: place.address || '',

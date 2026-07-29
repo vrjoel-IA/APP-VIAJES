@@ -94,14 +94,18 @@ export default function GuideTab({ trip, onOpenPoi, onShowOnMap, onAddToDay }) {
                             key={s.id}
                             data-section-id={s.id}
                             ref={el => { sectionRefs.current[s.id] = el; }}
-                            style={{ scrollMarginTop: '80px', marginBottom: 'var(--space-2xl)' }}
+                            className="card guide-section-card"
+                            style={{ scrollMarginTop: '72px' }}
                         >
-                            <h2 className="text-title" style={{ marginBottom: 'var(--space-md)' }}>{s.titulo}</h2>
+                            <div className="guide-section-head">
+                                <span className="guide-section-index">{secciones.indexOf(s) + 1}</span>
+                                <h2 className="guide-section-title">{s.titulo}</h2>
+                            </div>
                             <div className="guide-md" dangerouslySetInnerHTML={{ __html: htmlBySection[s.id] }} />
 
                             {lugares.length > 0 && (
                                 <div style={{ marginTop: 'var(--space-lg)', display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-                                    <p className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)' }}>
+                                    <p className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '.04em' }}>
                                         Lugares de esta sección
                                     </p>
                                     {lugares.map(poi => (

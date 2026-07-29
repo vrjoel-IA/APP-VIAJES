@@ -1,15 +1,79 @@
 import { useState } from 'react';
 import {
     Plus, Trash2, Navigation, Clock, CheckCircle2, Utensils,
-    Map, ExternalLink, ChevronUp, ChevronDown, Edit3, X, Sparkles, Star, PartyPopper
+    Map, ExternalLink, Edit3, X, Sparkles, Star, PartyPopper, GripVertical
 } from 'lucide-react';
 import { useApiIsLoaded } from '@vis.gl/react-google-maps';
+import {
+    DndContext, closestCenter, PointerSensor, TouchSensor, KeyboardSensor, useSensor, useSensors
+} from '@dnd-kit/core';
+import {
+    SortableContext, verticalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { formatDuration, CATEGORY_MAP } from '../utils/constants';
 import { haversineMeters } from '../lib/tripSchema';
 import { searchNearbyRestaurant } from '../lib/places';
 import { generateAiItinerary, resolveSuggestions } from '../lib/ai';
 import { toast } from '../lib/toast';
 import PoiDetailModal from './PoiDetailModal';
+
+// Preferencias rápidas para la IA: cada chip añade una frase a las indicaciones.
+const PREF_CHIPS = [
+    { key: 'temprano', label: '🌅 Empezar temprano', phrase: 'Empieza el día temprano.' },
+    { key: 'relajado', label: '🧘 Ritmo relajado', phrase: 'Quiero un ritmo relajado, sin prisas ni demasiadas paradas.' },
+    { key: 'pocoandar', label: '🚶 Poco caminar', phrase: 'No quiero caminar más de 20 minutos entre paradas.' },
+    { key: 'sincuestas', label: '⛰️ Evita cuestas', phrase: 'Evita cuestas y desniveles pronunciados.' },
+    { key: 'playa', label: '🏖️ Prioriza playas', phrase: 'Prioriza playas y costa.' },
+    { key: 'naturaleza', label: '🌿 Prioriza naturaleza', phrase: 'Prioriza naturaleza y paisajes.' },
+    { key: 'cultura', label: '🏛️ Prioriza cultura', phrase: 'Prioriza monumentos, museos y cultura.' },
+    { key: 'gastro', label: '🍽️ Prioriza gastronomía', phrase: 'Da protagonismo a la gastronomía local.' },
+    { key: 'ninos', label: '🧒 Con niños', phrase: 'Viajo con niños: evita planes largos o muy exigentes.' },
+    { key: 'comer14', label: '🍴 Comer ~14:00', phrase: 'Quiero comer sobre las 14:00.' },
+];
+
+// Fila reordenable del editor de itinerario (arrastrar y soltar, táctil incluido).
+function SortableStep({ step, idx, total, onDelete, onTimeChange }) {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: step.dndId });
+    const style = {
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.6 : 1,
+        zIndex: isDragging ? 2 : 1,
+    };
+    return (
+        <div ref={setNodeRef} style={style} className="card" >
+            <div style={{ padding: '10px 12px', display: 'flex', gap: 10, alignItems: 'center' }}>
+                <button
+                    type="button"
+                    className="dnd-handle"
+                    {...attributes}
+                    {...listeners}
+                    aria-label="Arrastrar para reordenar"
+                    style={{ cursor: 'grab', touchAction: 'none', color: 'var(--text-tertiary)', background: 'none', border: 'none', display: 'flex', flexShrink: 0, padding: 2 }}
+                >
+                    <GripVertical size={16} />
+                </button>
+                <span style={{ fontSize: '16px', flexShrink: 0 }}>{step.icon || '📍'}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="text-body truncate" style={{ fontWeight: 600, fontSize: '13px' }}>{step.name}</div>
+                    <input
+                        type="time"
+                        value={step.time || ''}
+                        onChange={e => onTimeChange(idx, e.target.value)}
+                        style={{ fontSize: '12px', color: 'var(--color-primary)', fontWeight: 700, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                    />
+                </div>
+                <button
+                    onClick={() => onDelete(idx)}
+                    aria-label="Eliminar parada"
+                    style={{ padding: 6, borderRadius: 6, background: '#fee2e2', border: 'none', cursor: 'pointer', color: '#ef4444', flexShrink: 0 }}
+                    disabled={total <= 1}
+                ><X size={14} /></button>
+            </div>
+        </div>
+    );
+}
 
 // Visit duration in hours by category (default estimates)
 const VISIT_DURATION = {
@@ -71,8 +135,46 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
     // AI state
     const [aiLoading, setAiLoading] = useState(false);
     const [aiInstructions, setAiInstructions] = useState(''); // indicaciones libres del usuario para la IA
+    const [aiPrefs, setAiPrefs] = useState({}); // preferencias rápidas (chips) -> frases para la IA
+    const [aiDays, setAiDays] = useState(1); // nº de días a planificar de una vez
     const [aiSuggestions, setAiSuggestions] = useState([]); // lugares nuevos sugeridos por la IA (resueltos con Google)
     const [aiEvents, setAiEvents] = useState([]); // fiestas/eventos locales detectados para las fechas del viaje
+    const [catFilter, setCatFilter] = useState('all'); // filtro de categoría en la selección manual de lugares
+
+    // Sensores DnD: puntero (ratón) y táctil (móvil, con retardo para no chocar con el scroll).
+    const sensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+        useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+        useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    );
+
+    // Frases de preferencias activas + texto libre -> indicaciones que recibe la IA.
+    const buildInstructions = () => {
+        const phrases = PREF_CHIPS.filter(c => aiPrefs[c.key]).map(c => c.phrase);
+        const free = aiInstructions.trim();
+        if (free) phrases.push(free);
+        return phrases.join(' ');
+    };
+
+    // Reordena la timeline manteniendo la salida al principio y la llegada al final.
+    const pinEnds = (list) => {
+        const dep = list.filter(s => s.type === 'departure');
+        const arr = list.filter(s => s.type === 'arrival');
+        const mid = list.filter(s => s.type !== 'departure' && s.type !== 'arrival');
+        return [...dep, ...mid, ...arr];
+    };
+
+    const handleDragEnd = (event) => {
+        const { active, over } = event;
+        if (!over || active.id === over.id) return;
+        setEditTimeline(prev => {
+            const oldIdx = prev.findIndex(s => s.dndId === active.id);
+            const newIdx = prev.findIndex(s => s.dndId === over.id);
+            if (oldIdx < 0 || newIdx < 0) return prev;
+            const moved = pinEnds(arrayMove(prev, oldIdx, newIdx));
+            return recalcTimesFrom(moved, 0);
+        });
+    };
 
     const itineraries = trip.itineraries || [];
     const allLocations = [
@@ -152,14 +254,21 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
 
     const handleEditExisting = (itinerary) => {
         setEditingItinerary(itinerary.id);
-        setEditTimeline(JSON.parse(JSON.stringify(itinerary.timeline || [])));
+        // Copia profunda + id estable por paso (necesario para el arrastrar/soltar).
+        const copy = (itinerary.timeline || []).map((s, i) => ({
+            ...JSON.parse(JSON.stringify(s)),
+            dndId: `step-${i}-${Math.random().toString(36).slice(2, 8)}`,
+        }));
+        setEditTimeline(copy);
     };
 
     const saveEditedItinerary = (itineraryId) => {
         const idx = itineraries.findIndex(i => i.id === itineraryId);
         if (idx < 0) return;
         const updated = [...itineraries];
-        updated[idx] = { ...updated[idx], timeline: editTimeline };
+        // Quitamos el id auxiliar de arrastre antes de persistir.
+        const cleanTimeline = editTimeline.map(({ dndId, ...rest }) => rest); // eslint-disable-line no-unused-vars
+        updated[idx] = { ...updated[idx], timeline: cleanTimeline };
         store.updateTrip(trip.id, { itineraries: updated });
         setEditingItinerary(null);
         setEditTimeline(null);
@@ -198,18 +307,6 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
             // arrival stays as is (last step)
         }
         return updated;
-    };
-
-    const moveStep = (idx, direction) => {
-        const newTimeline = [...editTimeline];
-        const targetIdx = idx + direction;
-        if (targetIdx < 0 || targetIdx >= newTimeline.length) return;
-        // Swap the two steps
-        [newTimeline[idx], newTimeline[targetIdx]] = [newTimeline[targetIdx], newTimeline[idx]];
-        // Find the first affected index (the lower of the two)
-        const anchorIdx = Math.min(idx, targetIdx);
-        const recalced = recalcTimesFrom(newTimeline, anchorIdx);
-        setEditTimeline(recalced);
     };
 
     const updateStepTime = (idx, newTime) => {
@@ -556,78 +653,93 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
         if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
 
         const assigned = getAssignedPoiIds();
-        const candidates = trip.pois.filter(p => p.isActive !== false && !assigned.has(p.id));
-        if (candidates.length === 0) {
+        let available = trip.pois.filter(p => p.isActive !== false && !assigned.has(p.id));
+        if (available.length === 0) {
             return toast('No quedan lugares sin asignar. Añade más o edita un día existente.', 'info');
         }
 
         const startLoc = allLocations.find(l => l.id === startId);
         const endLoc = allLocations.find(l => l.id === endId);
-
-        // Fecha concreta de este día = inicio del viaje + (díaN - 1), para que la IA
-        // tenga en cuenta fiestas/eventos temporales que coincidan con esas fechas.
-        const dayNumber = itineraries.length + 1;
-        let dayDate = null;
-        if (trip.startDate) {
-            const d = new Date(trip.startDate);
-            if (!isNaN(d)) {
-                d.setDate(d.getDate() + (dayNumber - 1));
-                dayDate = d.toISOString().slice(0, 10);
-            }
-        }
+        const instructions = buildInstructions();
+        const nDays = Math.max(1, Math.min(14, parseInt(aiDays, 10) || 1));
+        const locationBias = trip.destinationLat && trip.destinationLng
+            ? { lat: trip.destinationLat, lng: trip.destinationLng }
+            : null;
 
         setAiLoading(true);
+        const newDays = [];
+        const allEvents = [];
+        let lastSuggestions = [];
         try {
-            const ai = await generateAiItinerary({
-                destination: trip.destination || '',
-                dayNumber,
-                dayDate,
-                tripStart: trip.startDate || null,
-                tripEnd: trip.endDate || null,
-                instructions: aiInstructions.trim(),
-                startTime,
-                start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
-                end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
-                candidates: candidates.map(c => ({
-                    id: c.id, name: c.name, category: c.category,
-                    rating: c.rating, reviews: c.userRatingsTotal, lat: c.lat, lng: c.lng,
-                })),
-            });
+            for (let k = 0; k < nDays && available.length > 0; k++) {
+                const dayNumber = itineraries.length + k + 1;
+                // Fecha concreta = inicio del viaje + (díaN - 1), para fiestas/eventos temporales.
+                let dayDate = null;
+                if (trip.startDate) {
+                    const d = new Date(trip.startDate);
+                    if (!isNaN(d)) { d.setDate(d.getDate() + (dayNumber - 1)); dayDate = d.toISOString().slice(0, 10); }
+                }
 
-            setAiEvents(Array.isArray(ai.events) ? ai.events : []);
+                const candidates = available;
+                const ai = await generateAiItinerary({
+                    destination: trip.destination || '',
+                    dayNumber, dayDate,
+                    tripStart: trip.startDate || null,
+                    tripEnd: trip.endDate || null,
+                    totalDays: nDays,
+                    instructions,
+                    startTime,
+                    start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
+                    end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
+                    candidates: candidates.map(c => ({
+                        id: c.id, name: c.name, category: c.category,
+                        rating: c.rating, reviews: c.userRatingsTotal, lat: c.lat, lng: c.lng,
+                    })),
+                });
 
-            const built = await buildAiItinerary(ai, startLoc, endLoc, candidates);
-            if (built.optimizedPois.length === 0) {
-                toast('La IA no encontró una combinación válida. Prueba a añadir más lugares.', 'info');
-                return;
+                if (Array.isArray(ai.events)) allEvents.push(...ai.events);
+                lastSuggestions = ai.suggestions || [];
+
+                const built = await buildAiItinerary(ai, startLoc, endLoc, candidates);
+                if (built.optimizedPois.length === 0) {
+                    if (k === 0) toast('La IA no encontró una combinación válida. Prueba a añadir más lugares.', 'info');
+                    break;
+                }
+
+                newDays.push({
+                    id: `${Date.now()}-${k}`,
+                    title: ai.dayTitle || `Día ${dayNumber}`,
+                    summary: ai.summary || '',
+                    startTime, startId, endId, startLoc, endLoc,
+                    optimizedPois: built.optimizedPois,
+                    legs: built.legs,
+                    timeline: built.timeline,
+                    totalDurationSec: built.totalDurationSec,
+                });
+
+                // Los lugares usados en este día no se reutilizan en los siguientes.
+                const usedIds = new Set(built.timeline.filter(s => s.type === 'poi' && s.poiId).map(s => s.poiId));
+                available = available.filter(p => !usedIds.has(p.id));
             }
 
-            const newItinerary = {
-                id: editingDay,
-                title: ai.dayTitle || `Día ${dayNumber}`,
-                summary: ai.summary || '',
-                startTime, startId, endId, startLoc, endLoc,
-                optimizedPois: built.optimizedPois,
-                legs: built.legs,
-                timeline: built.timeline,
-                totalDurationSec: built.totalDurationSec,
-            };
-            const existingIndex = itineraries.findIndex(i => i.id === editingDay);
-            const updatedList = [...itineraries];
-            if (existingIndex >= 0) updatedList[existingIndex] = newItinerary;
-            else updatedList.push(newItinerary);
-            store.updateTrip(trip.id, { itineraries: updatedList });
-            setEditingDay(null);
+            if (newDays.length > 0) {
+                // Un solo día en edición -> respeta el id que se estaba editando; varios -> ids nuevos.
+                if (nDays === 1 && editingDay) newDays[0].id = editingDay;
+                const existingIndex = itineraries.findIndex(i => i.id === editingDay);
+                let updatedList = [...itineraries];
+                if (existingIndex >= 0) { updatedList[existingIndex] = newDays[0]; updatedList = [...updatedList, ...newDays.slice(1)]; }
+                else updatedList = [...updatedList, ...newDays];
+                store.updateTrip(trip.id, { itineraries: updatedList });
+                setEditingDay(null);
 
-            // Resuelve las sugerencias de lugares NUEVOS con Google Places.
-            const locationBias = trip.destinationLat && trip.destinationLng
-                ? { lat: trip.destinationLat, lng: trip.destinationLng }
-                : null;
-            const resolved = await resolveSuggestions(ai.suggestions || [], {
-                destination: trip.destination, locationBias,
-            });
-            const existingPlaceIds = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
-            setAiSuggestions(resolved.filter(r => !r.placeId || !existingPlaceIds.has(r.placeId)));
+                // Eventos (dedupe por nombre) y sugerencias de lugares nuevos.
+                const seen = new Set();
+                setAiEvents(allEvents.filter(e => e?.name && !seen.has(e.name) && seen.add(e.name)));
+                const resolved = await resolveSuggestions(lastSuggestions, { destination: trip.destination, locationBias });
+                const existingPlaceIds = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
+                setAiSuggestions(resolved.filter(r => !r.placeId || !existingPlaceIds.has(r.placeId)));
+                if (nDays > 1) toast(`Se han generado ${newDays.length} día(s).`, 'success');
+            }
         } catch (err) {
             toast(`No se pudo generar con IA: ${err.message}`, 'error', 7000);
         } finally {
@@ -696,49 +808,102 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                         <span style={{ fontWeight: 800, fontSize: '14px', color: 'var(--color-primary)' }}>Generar con IA</span>
                     </div>
                     <p className="text-caption text-secondary" style={{ marginBottom: '10px' }}>
-                        Elige solo el inicio, el fin y la hora. La IA seleccionará los mejores lugares de tu lista,
+                        Elige el inicio, el fin y tus preferencias. La IA seleccionará los mejores lugares de tu lista,
                         los ordenará por cercanía y te sugerirá sitios imprescindibles. Podrás editarlo después.
                     </p>
+
+                    {/* Preferencias rápidas: cada chip añade una indicación para la IA. */}
+                    <div className="chip-row" style={{ marginBottom: '10px', flexWrap: 'nowrap' }}>
+                        {PREF_CHIPS.map(c => (
+                            <button
+                                key={c.key}
+                                type="button"
+                                className={`chip ${aiPrefs[c.key] ? 'active' : ''}`}
+                                style={{ fontSize: '12px', padding: '6px 12px' }}
+                                onClick={() => setAiPrefs(prev => ({ ...prev, [c.key]: !prev[c.key] }))}
+                            >
+                                {c.label}
+                            </button>
+                        ))}
+                    </div>
+
                     <textarea
                         className="input-field"
                         rows={2}
                         style={{ padding: '10px 12px', resize: 'vertical', marginBottom: '10px', fontSize: '13px' }}
-                        placeholder="Ideas o indicaciones (opcional): vamos con niños, prioriza playa, ritmo relajado, evita museos..."
+                        placeholder="Otras indicaciones (opcional): quiero ver estos 8 lugares, sin madrugar, terraza para cenar..."
                         value={aiInstructions}
                         onChange={e => setAiInstructions(e.target.value)}
                     />
+
+                    {/* Nº de días a planificar de una vez ("estos lugares en N días"). */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                        <label className="text-caption text-secondary" style={{ fontWeight: 700 }}>Días a planificar:</label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <button type="button" className="btn btn-outline" style={{ width: 34, height: 34, padding: 0, borderRadius: 8 }} onClick={() => setAiDays(d => Math.max(1, (parseInt(d, 10) || 1) - 1))}>−</button>
+                            <input
+                                type="number" min="1" max="14"
+                                value={aiDays}
+                                onChange={e => setAiDays(e.target.value)}
+                                style={{ width: 52, textAlign: 'center', padding: '6px', borderRadius: 8, border: '1px solid var(--border-color)', fontSize: 14, fontWeight: 700, background: 'var(--bg-primary)' }}
+                            />
+                            <button type="button" className="btn btn-outline" style={{ width: 34, height: 34, padding: 0, borderRadius: 8 }} onClick={() => setAiDays(d => Math.min(14, (parseInt(d, 10) || 1) + 1))}>+</button>
+                        </div>
+                    </div>
+
                     <button
                         className="btn btn-primary btn-full"
                         onClick={handleGenerateAI}
                         disabled={aiLoading || generating || !startId || !endId}
                     >
-                        {aiLoading ? '🧠 Pensando tu día...' : '✨ Generar día con IA'}
+                        {aiLoading ? '🧠 Pensando tu plan...' : (parseInt(aiDays, 10) > 1 ? `✨ Generar ${aiDays} días con IA` : '✨ Generar día con IA')}
                     </button>
                 </div>
 
                 {/* POI selection with visit hours */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '4px' }}>
-                    <h3 className="text-body" style={{ fontWeight: 700 }}>O elígelos tú</h3>
-                    {(() => {
-                        const activePois = trip.pois.filter(p => p.isActive !== false);
-                        const allSelected = activePois.length > 0 && activePois.every(p => selectedPois.includes(p.id));
-                        return (
-                            <button
-                                className="text-caption"
-                                style={{ color: 'var(--color-primary)', fontWeight: 700 }}
-                                onClick={() => setSelectedPois(allSelected ? [] : activePois.map(p => p.id))}
-                            >
-                                {allSelected ? 'Desmarcar todos' : 'Marcar todos'}
-                            </button>
-                        );
-                    })()}
-                </div>
-                <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
-                    Selecciona los lugares e indica cuánto tiempo estimas. El itinerario incluirá almuerzo y cena automáticamente.
-                </p>
+                {(() => {
+                    const activePois = trip.pois.filter(p => p.isActive !== false);
+                    const visiblePois = activePois.filter(p => catFilter === 'all' || p.category === catFilter);
+                    // Categorías presentes entre los lugares activos (para el filtro rápido).
+                    const presentCats = [...new Set(activePois.map(p => p.category))]
+                        .map(id => CATEGORY_MAP[id]).filter(Boolean);
+                    const allVisibleSelected = visiblePois.length > 0 && visiblePois.every(p => selectedPois.includes(p.id));
+                    return (
+                        <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '4px' }}>
+                                <h3 className="text-body" style={{ fontWeight: 700 }}>O elígelos tú</h3>
+                                <button
+                                    className="text-caption"
+                                    style={{ color: 'var(--color-primary)', fontWeight: 700 }}
+                                    onClick={() => {
+                                        // Marca/desmarca todos los VISIBLES (respeta el filtro de categoría).
+                                        const visibleIds = visiblePois.map(p => p.id);
+                                        setSelectedPois(prev => allVisibleSelected
+                                            ? prev.filter(id => !visibleIds.includes(id))
+                                            : [...new Set([...prev, ...visibleIds])]);
+                                    }}
+                                >
+                                    {allVisibleSelected ? 'Desmarcar todos' : 'Marcar todos'}
+                                </button>
+                            </div>
+                            <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-sm)' }}>
+                                Selecciona los lugares e indica cuánto tiempo estimas. El itinerario incluirá almuerzo y cena automáticamente.
+                            </p>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: 'var(--space-xl)' }}>
-                    {trip.pois.filter(p => p.isActive !== false).map(poi => {
+                            {/* Filtro por categoría para seleccionar por bloques. */}
+                            {presentCats.length > 1 && (
+                                <div className="chip-row" style={{ marginBottom: 'var(--space-md)' }}>
+                                    <button className={`chip ${catFilter === 'all' ? 'active' : ''}`} onClick={() => setCatFilter('all')}>📍 Todo</button>
+                                    {presentCats.map(c => (
+                                        <button key={c.id} className={`chip ${catFilter === c.id ? 'active' : ''}`} onClick={() => setCatFilter(c.id)}>
+                                            {c.emoji} {c.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: 'var(--space-xl)' }}>
+                                {visiblePois.map(poi => {
                         const isSelected = selectedPois.includes(poi.id);
                         const defaultHrs = VISIT_DURATION[poi.category] || 1.5;
                         return (
@@ -799,7 +964,10 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                             </div>
                         );
                     })}
-                </div>
+                            </div>
+                        </>
+                    );
+                })()}
 
                 <button
                     className="btn btn-accent btn-full"
@@ -824,54 +992,25 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                     </button>
                 </div>
                 <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
-                    Reordena los pasos, cambia los horarios o elimina paradas.
+                    Arrastra <GripVertical size={12} style={{ display: 'inline', verticalAlign: 'middle' }} /> para reordenar las paradas o pulsa la ✕ para quitarlas. Los horarios se recalculan solos.
                 </p>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 'var(--space-lg)' }}>
-                    {editTimeline.map((step, idx) => {
-                        const isPoi = step.type === 'poi';
-                        const isMeal = step.type === 'meal';
-                        return (
-                            <div key={idx} className="card" style={{ padding: '10px 12px', display: 'flex', gap: 10, alignItems: 'center' }}>
-                                <span style={{ fontSize: '16px', flexShrink: 0 }}>{step.icon || '📍'}</span>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div className="text-body" style={{ fontWeight: 600, fontSize: '13px' }}>{step.name}</div>
-                                    <input
-                                        type="time"
-                                        value={step.time}
-                                        onChange={e => updateStepTime(idx, e.target.value)}
-                                        style={{
-                                            fontSize: '12px', color: 'var(--color-primary)', fontWeight: 700,
-                                            background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                                        }}
-                                    />
-                                </div>
-                                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                                    {(isPoi || isMeal) && (
-                                        <>
-                                            <button
-                                                onClick={() => moveStep(idx, -1)}
-                                                disabled={idx === 0}
-                                                style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', opacity: idx === 0 ? 0.3 : 1 }}
-                                            ><ChevronUp size={14} /></button>
-                                            <button
-                                                onClick={() => moveStep(idx, 1)}
-                                                disabled={idx === editTimeline.length - 1}
-                                                style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', opacity: idx === editTimeline.length - 1 ? 0.3 : 1 }}
-                                            ><ChevronDown size={14} /></button>
-                                        </>
-                                    )}
-                                    {(isPoi || isMeal) && (
-                                        <button
-                                            onClick={() => deleteStep(idx)}
-                                            style={{ padding: 6, borderRadius: 6, background: '#fee2e2', border: 'none', cursor: 'pointer', color: '#ef4444' }}
-                                        ><X size={14} /></button>
-                                    )}
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                    <SortableContext items={editTimeline.map(s => s.dndId)} strategy={verticalListSortingStrategy}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 'var(--space-lg)' }}>
+                            {editTimeline.map((step, idx) => (
+                                <SortableStep
+                                    key={step.dndId}
+                                    step={step}
+                                    idx={idx}
+                                    total={editTimeline.length}
+                                    onDelete={deleteStep}
+                                    onTimeChange={updateStepTime}
+                                />
+                            ))}
+                        </div>
+                    </SortableContext>
+                </DndContext>
 
                 <button className="btn btn-primary btn-full" onClick={() => saveEditedItinerary(editingItinerary)}>
                     💾 Guardar Cambios
@@ -1164,10 +1303,12 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
             {/* POI Detail Modal */}
             {poiDetail && (
                 <PoiDetailModal
-                    poi={poiDetail}
+                    poi={trip.pois.find(p => p.id === poiDetail.id) || poiDetail}
                     trip={trip}
                     onClose={() => setPoiDetail(null)}
                     onDelete={() => setPoiDetail(null)}
+                    onUpdate={(updates) => store.updatePoi(trip.id, poiDetail.id, updates)}
+                    onSaveDistances={(records) => store.saveDistances(trip.id, records)}
                 />
             )}
         </div>

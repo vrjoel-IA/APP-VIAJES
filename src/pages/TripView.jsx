@@ -18,6 +18,8 @@ import RouteOverlay from '../components/RouteOverlay';
 import { useTripStore } from '../store/useTripStore';
 import { exportFromInternal, haversineMeters } from '../lib/tripSchema';
 import { searchPlacesByText, getPlaceDetails } from '../lib/places';
+import { computeDrivingMatrix, findDistance } from '../lib/distances';
+import { guessCategory } from '../lib/categorize';
 import { toast } from '../lib/toast';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
 import './TripView.css';
@@ -62,6 +64,7 @@ export default function TripView() {
     const [routeItinerary, setRouteItinerary] = useState(null); // itinerario a dibujar en el mapa
 
     const mapRef = useRef(null);
+    const comparisonRef = useRef(null);
     const apiIsLoaded = useApiIsLoaded();
     const repairingPhotos = useRef(new Set());
     const enrichingPhotos = useRef(new Set());
@@ -203,6 +206,35 @@ export default function TripView() {
         }
     }, [measureSource, measureDest, measureMode, apiIsLoaded]);
 
+    // Al fijar/cambiar el campamento base recalculamos EN LOTE los tiempos en coche que
+    // falten para esa base (barato: Distance Matrix agrupa destinos). Andando/transporte
+    // se calculan bajo demanda al abrir cada lugar. Así el alojamiento es un origen dinámico.
+    const drivingBaseDone = useRef(null);
+    useEffect(() => {
+        if (!apiIsLoaded || !trip) return;
+        const base = trip.selectedAccommodation
+            ? trip.accommodations.find(a => a.id === trip.selectedAccommodation)
+            : trip.accommodations.find(a => a.isActive !== false);
+        if (!base || base.lat == null) return;
+        if (drivingBaseDone.current === base.id) return;
+        drivingBaseDone.current = base.id;
+
+        const pending = trip.pois.filter(p =>
+            p.lat != null && !p.descartado && findDistance(trip, base.id, p.id)?.drivingDurationSeconds == null);
+        if (pending.length === 0) return;
+
+        let cancelled = false;
+        (async () => {
+            try {
+                const rows = await computeDrivingMatrix(base, pending);
+                if (cancelled || rows.length === 0) return;
+                store.saveDistances(trip.id, rows.map(r => ({ accommodationId: base.id, poiId: r.poiId, drivingDurationSeconds: r.drivingDurationSeconds, distanceMeters: r.distanceMeters })));
+            } catch { /* sin conexión o API sin habilitar: se calculará bajo demanda */ }
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiIsLoaded, trip?.selectedAccommodation, trip?.accommodations, tripId]);
+
     // ===== COMPARISON =====
     const runComparison = useCallback(async () => {
         if (!trip || trip.accommodations.length === 0 || trip.pois.length === 0) return;
@@ -313,7 +345,9 @@ export default function TripView() {
         });
         store.saveDistances(tripId, distanceRecords);
         setComparisonResults(results);
-        setTab('compare');
+        // La comparación vive ahora DENTRO de Alojamiento: hacemos scroll a los resultados
+        // en vez de cambiar de pestaña (un único flujo, sin romper la navegación).
+        setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
     }, [trip, tripId, store, weightEssentialOnly]);
 
     // ===== MAP INIT =====
@@ -376,11 +410,15 @@ export default function TripView() {
     };
 
     const handleAddSearchResult = (place, category) => {
-        // `place` ya viene normalizado desde el adaptador de Places.
+        // `place` ya viene normalizado desde el adaptador de Places. Si no se pasa categoría
+        // explícita, la deducimos de los `types` de Google + el nombre. Si el usuario la elige
+        // a mano, la fijamos (categoryLocked) para que la reclasificación no la toque.
+        const resolved = category || guessCategory({ name: place.name, types: place.types });
         store.addPoi(tripId, {
             name: place.name,
             placeId: place.placeId,
-            category: category,
+            category: resolved,
+            categoryLocked: !!category,
             lat: place.lat,
             lng: place.lng,
             address: place.address || '',
@@ -474,11 +512,101 @@ export default function TripView() {
 
 
 
+    // Resultados de la comparación de alojamientos (se muestran DENTRO de Alojamiento).
+    const renderComparison = () => (
+        <div className="stagger">
+            {/* Winner */}
+            {comparisonResults.length > 0 && (
+                <div className="winner-card card animate-fade-in-up">
+                    <div className="winner-header">
+                        <span className="badge badge-gold">🥇 Recomendado</span>
+                        <h2 className="text-title" style={{ marginTop: '8px' }}>{comparisonResults[0].name}</h2>
+                    </div>
+                    <div className="winner-savings">
+                        {comparisonResults.length > 1 && (
+                            <p className="text-hero" style={{ color: 'var(--color-primary)', fontSize: '22px' }}>
+                                Ahorrarás {formatDuration(
+                                    (comparisonResults[comparisonResults.length - 1].weightedAvg - comparisonResults[0].weightedAvg)
+                                )} por trayecto
+                            </p>
+                        )}
+                    </div>
+                    <div className="winner-metrics">
+                        <div className="metric-box">
+                            <span className="text-small text-tertiary">Media</span>
+                            <span className="metric-value">{formatDuration(comparisonResults[0].avgDuration)}</span>
+                        </div>
+                        <div className="metric-box">
+                            <span className="text-small text-tertiary">Máximo</span>
+                            <span className="metric-value">{formatDuration(comparisonResults[0].maxDuration)}</span>
+                        </div>
+                        <div className="metric-box">
+                            <span className="text-small text-tertiary">Ponderada</span>
+                            <span className="metric-value">{formatDuration(comparisonResults[0].weightedAvg)}</span>
+                        </div>
+                    </div>
+
+                    {/* Breakdown */}
+                    <div className="winner-breakdown">
+                        <p className="text-caption text-secondary" style={{ marginBottom: '8px' }}>Tiempos a cada lugar:</p>
+                        {comparisonResults[0].distances.map(d => (
+                            <div key={d.poiId} className="breakdown-row">
+                                <span className="text-caption truncate" style={{ flex: 1 }}>{d.poiName}</span>
+                                <span className="text-caption" style={{ fontWeight: 700 }}>{d.durationText}</span>
+                            </div>
+                        ))}
+                    </div>
+
+                    <button
+                        className="btn btn-accent btn-full"
+                        style={{ marginTop: 'var(--space-md)' }}
+                        onClick={() => handleSelectWinner(comparisonResults[0].accommodationId)}
+                    >
+                        <CheckCircle2 size={18} />
+                        {trip.selectedAccommodation === comparisonResults[0].accommodationId
+                            ? '✅ Campamento Base Fijado'
+                            : 'Fijar Campamento Base'
+                        }
+                    </button>
+                </div>
+            )}
+
+            {/* Other Candidates */}
+            {comparisonResults.slice(1).map(result => (
+                <div key={result.accommodationId} className="card compare-card animate-fade-in-up">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                        <div>
+                            <span className="badge badge-primary" style={{ marginBottom: '6px' }}>#{result.rank}</span>
+                            <h3 style={{ fontWeight: 700, fontSize: '15px' }}>{result.name}</h3>
+                        </div>
+                        <span className="text-caption" style={{ color: 'var(--color-danger)', fontWeight: 700 }}>
+                            +{formatDuration(result.weightedAvg - comparisonResults[0].weightedAvg)}/trayecto
+                        </span>
+                    </div>
+                    <div className="compare-metrics" style={{ marginTop: '12px' }}>
+                        <span className="text-caption text-secondary">Media: {formatDuration(result.avgDuration)}</span>
+                        <span className="text-caption text-secondary">Máx: {formatDuration(result.maxDuration)}</span>
+                    </div>
+
+                    {/* Breakdown */}
+                    <div className="winner-breakdown" style={{ marginTop: 'var(--space-md)' }}>
+                        <p className="text-caption text-secondary" style={{ marginBottom: '8px' }}>Tiempos a cada lugar:</p>
+                        {result.distances.map(d => (
+                            <div key={d.poiId} className="breakdown-row" style={{ padding: '4px 0' }}>
+                                <span className="text-caption truncate" style={{ flex: 1 }}>{d.poiName}</span>
+                                <span className="text-caption" style={{ fontWeight: 700 }}>{d.durationText}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+
     const TABS = [
         { id: 'places', label: 'Lugares', icon: List },
         { id: 'map', label: 'Mapa', icon: MapIcon },
         { id: 'hotels', label: 'Alojamiento', icon: Hotel },
-        { id: 'compare', label: 'Comparar', icon: BarChart3 },
         { id: 'itinerary', label: 'Itinerario', icon: Navigation },
         { id: 'guide', label: 'Guía', icon: BookOpen },
     ];
@@ -595,7 +723,16 @@ export default function TripView() {
                             <div key={poi.id} className="poi-item card animate-fade-in-up" style={{ opacity: poi.descartado ? 0.55 : 1 }}>
                                 <button
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); store.togglePoiActive(tripId, poi.id); }}
+                                    title={poi.isActive !== false ? 'Quitar del viaje' : 'Incluir en el viaje'}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        // Reactivar un lugar descartado también lo saca de "descartado" (coherencia de estados).
+                                        if (poi.isActive === false && poi.descartado) {
+                                            store.updatePoi(tripId, poi.id, { isActive: true, descartado: false });
+                                        } else {
+                                            store.togglePoiActive(tripId, poi.id);
+                                        }
+                                    }}
                                     style={{
                                         width: '44px', height: '44px', flexShrink: 0,
                                         cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -765,6 +902,17 @@ export default function TripView() {
                         {routeItinerary && routeStops.length >= 2 && (
                             <RouteOverlay stops={routeStops} color="#256af4" />
                         )}
+
+                        {/* Ruta de la medida Desde/Hasta: dibuja el recorrido real entre A y B. */}
+                        {measureSource && measureDest && measureSource.lat != null && measureDest.lat != null && (
+                            <RouteOverlay
+                                origin={{ lat: measureSource.lat, lng: measureSource.lng }}
+                                destination={{ lat: measureDest.lat, lng: measureDest.lng }}
+                                mode={measureMode}
+                                color="#f5a623"
+                                preserveViewport
+                            />
+                        )}
                         {routeItinerary?.startLoc && (
                             <AdvancedMarker position={{ lat: routeItinerary.startLoc.lat, lng: routeItinerary.startLoc.lng }} title="Inicio">
                                 <div className="marker-custom" style={{ background: '#10b981' }}>🚗</div>
@@ -809,10 +957,21 @@ export default function TripView() {
                                 onCloseClick={() => setSelectedMarker(null)}
                             >
                                 <div style={{ maxWidth: '200px', padding: '2px' }}>
-                                    <h3 style={{ fontSize: '13px', fontWeight: 800, marginBottom: '2px', lineHeight: 1.2 }}>{selectedMarker.name}</h3>
-                                    {selectedMarker.category && (
-                                        <span className="text-secondary" style={{ fontSize: '10px' }}>{CATEGORY_MAP[selectedMarker.category]?.label}</span>
-                                    )}
+                                    {/* Cabecera compacta con miniatura: no agranda el menú. */}
+                                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                        <img
+                                            src={selectedMarker.photoUrl || getPlaceholderImage(selectedMarker.name)}
+                                            alt=""
+                                            onError={e => { e.currentTarget.src = getPlaceholderImage(selectedMarker.name); }}
+                                            style={{ width: 44, height: 44, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }}
+                                        />
+                                        <div style={{ minWidth: 0 }}>
+                                            <h3 style={{ fontSize: '13px', fontWeight: 800, marginBottom: '2px', lineHeight: 1.2 }}>{selectedMarker.name}</h3>
+                                            {selectedMarker.category && (
+                                                <span className="text-secondary" style={{ fontSize: '10px' }}>{CATEGORY_MAP[selectedMarker.category]?.label}</span>
+                                            )}
+                                        </div>
+                                    </div>
                                     <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                         <button className="btn btn-primary" style={{ padding: '4px 8px', fontSize: '11px', width: '100%', borderRadius: '4px' }} onClick={() => {
                                             if (selectedMarker.placeId && !selectedMarker.category) setAccDetail(selectedMarker);
@@ -989,112 +1148,19 @@ export default function TripView() {
                             )}
                         </button>
                     )}
+
+                    {/* Resultados de la comparación, integrados en el mismo flujo. */}
+                    {comparisonResults && (
+                        <div ref={comparisonRef} style={{ marginTop: 'var(--space-xl)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--space-md)' }}>
+                                <BarChart3 size={18} style={{ color: 'var(--color-primary)' }} />
+                                <h3 className="text-subtitle">Comparación de ubicaciones</h3>
+                            </div>
+                            {renderComparison()}
+                        </div>
+                    )}
                 </div>
             )}
-
-            {/* ===== TAB: COMPARE ===== */}
-            {
-                tab === 'compare' && (
-                    <div className="tab-content" style={{ padding: 'var(--space-lg) var(--space-lg) calc(var(--nav-height) + 120px) var(--space-lg)' }}>
-                        {!comparisonResults ? (
-                            <div className="empty-state" style={{ marginTop: 'var(--space-xl)' }}>
-                                <BarChart3 size={48} />
-                                <p className="text-body text-tertiary">Añade lugares y alojamientos, luego pulsa "Comparar Ubicaciones"</p>
-                                <button className="btn btn-primary" onClick={() => setTab('hotels')}>
-                                    Ir a Alojamiento
-                                </button>
-                            </div>
-                        ) : (
-                            <div className="stagger">
-                                {/* Winner */}
-                                {comparisonResults.length > 0 && (
-                                    <div className="winner-card card animate-fade-in-up">
-                                        <div className="winner-header">
-                                            <span className="badge badge-gold">🥇 Recomendado</span>
-                                            <h2 className="text-title" style={{ marginTop: '8px' }}>{comparisonResults[0].name}</h2>
-                                        </div>
-                                        <div className="winner-savings">
-                                            {comparisonResults.length > 1 && (
-                                                <p className="text-hero" style={{ color: 'var(--color-primary)', fontSize: '22px' }}>
-                                                    Ahorrarás {formatDuration(
-                                                        (comparisonResults[comparisonResults.length - 1].weightedAvg - comparisonResults[0].weightedAvg)
-                                                    )} por trayecto
-                                                </p>
-                                            )}
-                                        </div>
-                                        <div className="winner-metrics">
-                                            <div className="metric-box">
-                                                <span className="text-small text-tertiary">Media</span>
-                                                <span className="metric-value">{formatDuration(comparisonResults[0].avgDuration)}</span>
-                                            </div>
-                                            <div className="metric-box">
-                                                <span className="text-small text-tertiary">Máximo</span>
-                                                <span className="metric-value">{formatDuration(comparisonResults[0].maxDuration)}</span>
-                                            </div>
-                                            <div className="metric-box">
-                                                <span className="text-small text-tertiary">Ponderada</span>
-                                                <span className="metric-value">{formatDuration(comparisonResults[0].weightedAvg)}</span>
-                                            </div>
-                                        </div>
-
-                                        {/* Breakdown */}
-                                        <div className="winner-breakdown">
-                                            <p className="text-caption text-secondary" style={{ marginBottom: '8px' }}>Tiempos a cada lugar:</p>
-                                            {comparisonResults[0].distances.map(d => (
-                                                <div key={d.poiId} className="breakdown-row">
-                                                    <span className="text-caption truncate" style={{ flex: 1 }}>{d.poiName}</span>
-                                                    <span className="text-caption" style={{ fontWeight: 700 }}>{d.durationText}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-
-                                        <button
-                                            className="btn btn-accent btn-full"
-                                            style={{ marginTop: 'var(--space-md)' }}
-                                            onClick={() => handleSelectWinner(comparisonResults[0].accommodationId)}
-                                        >
-                                            <CheckCircle2 size={18} />
-                                            {trip.selectedAccommodation === comparisonResults[0].accommodationId
-                                                ? '✅ Campamento Base Fijado'
-                                                : 'Fijar Campamento Base'
-                                            }
-                                        </button>
-                                    </div>
-                                )}
-
-                                {/* Other Candidates */}
-                                {comparisonResults.slice(1).map(result => (
-                                    <div key={result.accommodationId} className="card compare-card animate-fade-in-up">
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                                            <div>
-                                                <span className="badge badge-primary" style={{ marginBottom: '6px' }}>#{result.rank}</span>
-                                                <h3 style={{ fontWeight: 700, fontSize: '15px' }}>{result.name}</h3>
-                                            </div>
-                                            <span className="text-caption" style={{ color: 'var(--color-danger)', fontWeight: 700 }}>
-                                                +{formatDuration(result.weightedAvg - comparisonResults[0].weightedAvg)}/trayecto
-                                            </span>
-                                        </div>
-                                        <div className="compare-metrics" style={{ marginTop: '12px' }}>
-                                            <span className="text-caption text-secondary">Media: {formatDuration(result.avgDuration)}</span>
-                                            <span className="text-caption text-secondary">Máx: {formatDuration(result.maxDuration)}</span>
-                                        </div>
-
-                                        {/* Breakdown */}
-                                        <div className="winner-breakdown" style={{ marginTop: 'var(--space-md)' }}>
-                                            <p className="text-caption text-secondary" style={{ marginBottom: '8px' }}>Tiempos a cada lugar:</p>
-                                            {result.distances.map(d => (
-                                                <div key={d.poiId} className="breakdown-row" style={{ padding: '4px 0' }}>
-                                                    <span className="text-caption truncate" style={{ flex: 1 }}>{d.poiName}</span>
-                                                    <span className="text-caption" style={{ fontWeight: 700 }}>{d.durationText}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
 
             {/* ===== TAB: ITINERARY ===== */}
             {tab === 'itinerary' && (
@@ -1165,19 +1231,33 @@ export default function TripView() {
                                             )}
                                         </div>
                                     </div>
-                                    <div className="sr-actions" style={{ display: 'flex', gap: '8px', paddingLeft: '60px', marginTop: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
-                                        {CATEGORIES.map(c => (
-                                            <button
-                                                key={c.id}
-                                                className="sr-cat-btn"
-                                                title={`Añadir como ${c.label}`}
-                                                onClick={() => handleAddSearchResult(place, c.id)}
-                                                style={{ flexShrink: 0 }}
-                                            >
-                                                {c.emoji}
-                                            </button>
-                                        ))}
-                                    </div>
+                                    {(() => {
+                                        const guessed = CATEGORY_MAP[guessCategory({ name: place.name, types: place.types })] || CATEGORY_MAP.other;
+                                        return (
+                                            <>
+                                                <button
+                                                    className="btn btn-primary"
+                                                    style={{ marginTop: '8px', marginLeft: '60px', width: 'calc(100% - 60px)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: '13px', padding: '8px 12px' }}
+                                                    onClick={() => handleAddSearchResult(place)}
+                                                >
+                                                    <Plus size={15} /> Añadir como {guessed.emoji} {guessed.label}
+                                                </button>
+                                                <div className="sr-actions" style={{ display: 'flex', gap: '8px', paddingLeft: '60px', marginTop: '6px', overflowX: 'auto', paddingBottom: '4px' }}>
+                                                    {CATEGORIES.map(c => (
+                                                        <button
+                                                            key={c.id}
+                                                            className="sr-cat-btn"
+                                                            title={`Añadir como ${c.label}`}
+                                                            onClick={() => handleAddSearchResult(place, c.id)}
+                                                            style={{ flexShrink: 0 }}
+                                                        >
+                                                            {c.emoji}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </>
+                                        );
+                                    })()}
                                 </div>
                             ))}
                             {!searchLoading && searchResults.length === 0 && searchQuery && (
@@ -1243,11 +1323,13 @@ export default function TripView() {
 
             {poiDetail && (
                 <PoiDetailModal
-                    poi={poiDetail}
+                    poi={trip.pois.find(p => p.id === poiDetail.id) || poiDetail}
                     trip={trip}
                     onClose={() => setPoiDetail(null)}
                     onDelete={() => { store.removePoi(tripId, poiDetail.id); setPoiDetail(null); }}
                     onUpdate={(updates) => store.updatePoi(tripId, poiDetail.id, updates)}
+                    onShowOnMap={showPoiOnMap}
+                    onSaveDistances={(records) => store.saveDistances(tripId, records)}
                 />
             )}
 

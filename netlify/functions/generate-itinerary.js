@@ -68,7 +68,7 @@ const RESPONSE_SCHEMA = {
   required: ['dayTitle', 'timeline'],
 };
 
-function buildPrompt({ destination, dayNumber, dayDate, tripStart, tripEnd, startTime, start, end, candidates, instructions }) {
+function buildPrompt({ destination, dayNumber, dayDate, tripStart, tripEnd, totalDays, startTime, start, end, candidates, instructions }) {
   const list = candidates
     .map(
       (c) =>
@@ -78,8 +78,11 @@ function buildPrompt({ destination, dayNumber, dayDate, tripStart, tripEnd, star
 
   const fecha = dayDate ? `La fecha concreta de este día es ${dayDate}.` : 'No se conoce la fecha exacta.';
   const rango = tripStart && tripEnd ? ` El viaje completo va del ${tripStart} al ${tripEnd}.` : '';
+  const multi = totalDays && totalDays > 1
+    ? ` Este día forma parte de un plan de ${totalDays} días: los lugares de la lista son SOLO los que aún no se han usado en días anteriores, así que reparte con sensatez y no intentes meterlo todo hoy.`
+    : '';
   const indicaciones = instructions
-    ? `\n\nINDICACIONES DEL USUARIO (PRIORITARIAS: respétalas por encima de lo demás siempre que sea razonable):\n"${instructions}"`
+    ? `\n\nINDICACIONES DEL USUARIO (PRIORITARIAS: respétalas por encima de lo demás siempre que sea razonable; si piden poco caminar, minimiza distancias a pie y agrupa por cercanía; si dan una hora de comida, respétala; si piden empezar temprano, adelanta el inicio):\n"${instructions}"`
     : '';
 
   return `Eres un GUÍA LOCAL EXPERTO de ${destination || 'el destino'}. Diseña el día como lo haría
@@ -87,7 +90,7 @@ un planificador humano con sentido común, NO como un asistente genérico que so
 
 Planifica UN día completo (día ${dayNumber}). Empieza a las ${startTime} en el punto de inicio
 y termina en el punto final.
-${fecha}${rango}
+${fecha}${rango}${multi}
 Inicio: ${start.name} (${start.lat},${start.lng}).
 Fin: ${end.name} (${end.lat},${end.lng}).
 

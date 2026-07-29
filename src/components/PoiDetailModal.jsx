@@ -1,48 +1,104 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     X, MapPin, Star, Navigation, Phone, Globe, Clock,
     ChevronLeft, ChevronRight, Trash2, ExternalLink,
-    Heart, CheckCircle2, Ban, Pencil, Timer, Sun
+    Heart, CheckCircle2, Ban, Pencil, Timer, Sun, Circle,
+    Map as MapIconLucide, Car, Footprints, Bus,
+    FileText, Sparkles, Eye, Lightbulb, Ticket, Accessibility, AlertCircle
 } from 'lucide-react';
+import { useApiIsLoaded } from '@vis.gl/react-google-maps';
 import { CATEGORIES, CATEGORY_MAP, formatDuration, getPlaceholderImage } from '../utils/constants';
+import { parseNotes } from '../lib/notesFormat';
+import { computeTravel, findDistance } from '../lib/distances';
 
 const PRICE_LABELS = ['Gratis', 'Económico', 'Moderado', 'Caro', 'Muy caro'];
 
-// Chip de estado con área de pulsación grande (uso en móvil con sol).
-function StatusChip({ active, activeColor, icon: Icon, label, onClick }) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            style={{
-                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', minHeight: 40,
-                borderRadius: 'var(--radius-full)', cursor: 'pointer', fontSize: 13, fontWeight: 700,
-                border: active ? 'none' : '1px solid var(--border-color)',
-                background: active ? activeColor : 'var(--bg-secondary)',
-                color: active ? 'white' : 'var(--text-secondary)',
-                WebkitTapHighlightColor: 'transparent',
-            }}
-        >
-            <Icon size={15} fill={active && Icon === Heart ? 'white' : 'none'} /> {label}
-        </button>
-    );
+// Iconos por tipo de bloque de notas (los nombres los produce notesFormat.js).
+const NOTE_ICONS = {
+    FileText, Sparkles, Eye, Lightbulb, Clock, Ticket, Timer, Sun, Accessibility, AlertCircle,
+};
+
+// Los cuatro estados posibles de un lugar (mutuamente excluyentes).
+const ESTADOS = [
+    { key: 'imprescindible', label: 'Imprescindible', icon: Heart, color: 'var(--color-primary)' },
+    { key: 'yaVisitado', label: 'Visitado', icon: CheckCircle2, color: 'var(--color-accent)' },
+    { key: 'descartado', label: 'Descartado', icon: Ban, color: 'var(--color-danger)' },
+    { key: 'sin_marcar', label: 'Sin marcar', icon: Circle, color: 'var(--text-tertiary)' },
+];
+
+// Devuelve el estado actual del POI a partir de sus booleanos.
+function estadoActual(poi) {
+    if (poi.imprescindible) return 'imprescindible';
+    if (poi.yaVisitado) return 'yaVisitado';
+    if (poi.descartado) return 'descartado';
+    return 'sin_marcar';
 }
 
-export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate }) {
+// Convierte un estado elegido en el conjunto de campos a persistir (exclusión mutua).
+// `descartado` desactiva el lugar; cualquier otro estado lo reactiva.
+function estadoUpdates(estado) {
+    const base = { imprescindible: false, yaVisitado: false, descartado: false };
+    if (estado === 'imprescindible') return { ...base, imprescindible: true, isActive: true };
+    if (estado === 'yaVisitado') return { ...base, yaVisitado: true, isActive: true };
+    if (estado === 'descartado') return { ...base, descartado: true, isActive: false };
+    return { ...base, isActive: true }; // sin_marcar
+}
+
+export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate, onShowOnMap, onSaveDistances }) {
     const [photoIdx, setPhotoIdx] = useState(0);
     const [showHours, setShowHours] = useState(false);
     const [isEditingCategory, setIsEditingCategory] = useState(false);
     const [editing, setEditing] = useState(false);
     const canEdit = typeof onUpdate === 'function';
+    const apiIsLoaded = useApiIsLoaded();
+    const computedFor = useRef(null); // clave (accId+poiId) ya calculada, evita repetir
 
     const photos = poi.photos?.length ? poi.photos : [poi.photoUrl || getPlaceholderImage(poi.name)];
     const catInfo = CATEGORY_MAP[poi.category] || { emoji: '📍', label: 'Lugar', color: '#6b7280' };
+    const notesBlocks = editing ? [] : parseNotes(poi.notas);
 
-    const dist = trip.selectedAccommodation
-        ? trip.distances?.find(d => d.accommodationId === trip.selectedAccommodation && d.poiId === poi.id)
-        : null;
+    // Base activa = campamento base fijado, o el primer alojamiento activo. Es el ORIGEN
+    // dinámico: si el usuario cambia de alojamiento, cambian los tiempos, NO la descripción.
+    const activeBase = trip?.selectedAccommodation
+        ? trip.accommodations?.find(a => a.id === trip.selectedAccommodation)
+        : trip?.accommodations?.find(a => a.isActive !== false);
+    const dist = findDistance(trip, activeBase?.id, poi.id);
+
+    // Cálculo perezoso de andando/transporte (y coche si faltara) al abrir el detalle.
+    // Se cachea en el viaje vía onSaveDistances; solo se pide lo que no esté ya guardado.
+    useEffect(() => {
+        if (!apiIsLoaded || !onSaveDistances || !activeBase || poi.lat == null) return;
+        const key = `${activeBase.id}|${poi.id}`;
+        if (computedFor.current === key) return;
+
+        const rec = findDistance(trip, activeBase.id, poi.id) || {};
+        const needs = [];
+        if (rec.walkingDurationSeconds == null) needs.push('WALKING');
+        if (rec.transitDurationSeconds == null) needs.push('TRANSIT');
+        if (rec.drivingDurationSeconds == null) needs.push('DRIVING');
+        if (needs.length === 0) { computedFor.current = key; return; }
+        computedFor.current = key;
+
+        let cancelled = false;
+        (async () => {
+            const patch = { accommodationId: activeBase.id, poiId: poi.id };
+            for (const mode of needs) {
+                const r = await computeTravel(activeBase, poi, mode);
+                if (r) {
+                    if (mode === 'WALKING') patch.walkingDurationSeconds = r.durationSec;
+                    else if (mode === 'TRANSIT') patch.transitDurationSeconds = r.durationSec;
+                    else { patch.drivingDurationSeconds = r.durationSec; patch.distanceMeters = r.distanceMeters; }
+                }
+            }
+            if (!cancelled && Object.keys(patch).length > 2) onSaveDistances([patch]);
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiIsLoaded, activeBase?.id, poi.id, poi.lat, onSaveDistances]);
 
     const mapsUrl = `https://www.google.com/maps/search/?api=1&query_place_id=${poi.placeId || ''}&query=${encodeURIComponent(poi.name)}`;
+    // Metros a texto corto (línea recta o de Google): 850 m / 12,3 km.
+    const fmtDist = (m) => (m == null ? null : m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1).replace('.', ',')} km`);
 
     return (
         <div className="modal-overlay animate-fade-in" onClick={onClose}>
@@ -145,7 +201,9 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                                 value={poi.category}
                                 onBlur={() => setIsEditingCategory(false)}
                                 onChange={(e) => {
-                                    if (onUpdate) onUpdate({ category: e.target.value });
+                                    // Cambio manual: fija la categoría (categoryLocked) para que la
+                                    // reclasificación automática no la vuelva a tocar.
+                                    if (onUpdate) onUpdate({ category: e.target.value, categoryLocked: true });
                                     setIsEditingCategory(false);
                                 }}
                                 style={{
@@ -153,7 +211,6 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                                     background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)'
                                 }}
                             >
-                                <option value="other">📌 Otro</option>
                                 {CATEGORIES.map(c => (
                                     <option key={c.id} value={c.id}>{c.emoji} {c.label}</option>
                                 ))}
@@ -198,26 +255,35 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                         </div>
                     )}
 
-                    {/* Estados de la investigación (grandes, para tocar con sol) */}
-                    {canEdit && (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-                            <StatusChip
-                                active={!!poi.imprescindible} activeColor="var(--color-primary)" icon={Heart}
-                                label="Imprescindible"
-                                onClick={() => onUpdate({ imprescindible: !poi.imprescindible })}
-                            />
-                            <StatusChip
-                                active={!!poi.yaVisitado} activeColor="var(--color-accent)" icon={CheckCircle2}
-                                label={poi.yaVisitado ? 'Ya visitado' : 'Marcar visitado'}
-                                onClick={() => onUpdate({ yaVisitado: !poi.yaVisitado })}
-                            />
-                            <StatusChip
-                                active={!!poi.descartado} activeColor="var(--color-danger)" icon={Ban}
-                                label={poi.descartado ? 'Descartado' : 'Descartar'}
-                                onClick={() => onUpdate({ descartado: !poi.descartado })}
-                            />
-                        </div>
-                    )}
+                    {/* Estado del lugar: control segmentado mutuamente excluyente (4 estados). */}
+                    {canEdit && (() => {
+                        const estado = estadoActual(poi);
+                        return (
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                                {ESTADOS.map(({ key, label, icon: Icon, color }) => {
+                                    const active = estado === key;
+                                    return (
+                                        <button
+                                            key={key}
+                                            type="button"
+                                            onClick={() => onUpdate(estadoUpdates(key))}
+                                            aria-pressed={active}
+                                            style={{
+                                                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', minHeight: 40,
+                                                borderRadius: 'var(--radius-full)', cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                                                border: active ? 'none' : '1px solid var(--border-color)',
+                                                background: active ? color : 'var(--bg-secondary)',
+                                                color: active ? 'white' : 'var(--text-secondary)',
+                                                WebkitTapHighlightColor: 'transparent',
+                                            }}
+                                        >
+                                            <Icon size={15} fill={active && Icon === Heart ? 'white' : 'none'} /> {label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        );
+                    })()}
 
                     {/* Datos de la investigación (municipio, duración, mejor momento, notas) */}
                     {(poi.municipio || poi.duracionEstimadaMin || poi.mejorMomento || poi.notas || canEdit) && (
@@ -272,10 +338,23 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                                             <span className="text-body text-secondary">{poi.mejorMomento}</span>
                                         </div>
                                     )}
-                                    {poi.notas && (
-                                        <p className="text-body text-secondary" style={{ lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{poi.notas}</p>
+                                    {notesBlocks.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 2 }}>
+                                            {notesBlocks.map((block, i) => {
+                                                const BlockIcon = NOTE_ICONS[block.icon] || FileText;
+                                                return (
+                                                    <div key={block.key + i}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                                            <BlockIcon size={14} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
+                                                            <span className="text-caption" style={{ fontWeight: 800, color: 'var(--text-primary)' }}>{block.label}</span>
+                                                        </div>
+                                                        <p className="text-body text-secondary" style={{ lineHeight: 1.55, whiteSpace: 'pre-wrap', margin: 0 }}>{block.body}</p>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
                                     )}
-                                    {!poi.municipio && !poi.duracionEstimadaMin && !poi.mejorMomento && !poi.notas && (
+                                    {!poi.municipio && !poi.duracionEstimadaMin && !poi.mejorMomento && notesBlocks.length === 0 && (
                                         <p className="text-caption text-tertiary">Sin notas todavía. Pulsa "Editar" para añadirlas.</p>
                                     )}
                                 </div>
@@ -292,12 +371,32 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                             </div>
                         )}
 
-                        {dist && (
-                            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                                <Navigation size={16} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
-                                <span className="text-body" style={{ color: 'var(--color-primary)', fontWeight: 700 }}>
-                                    {formatDuration(dist.drivingDurationSeconds)} desde tu alojamiento
-                                </span>
+                        {/* Distancia y tiempos desde el alojamiento (ORIGEN DINÁMICO). */}
+                        {activeBase && poi.lat != null && (
+                            <div className="card" style={{ background: 'var(--bg-secondary)', padding: 'var(--space-md)', gap: 10, display: 'flex', flexDirection: 'column' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                                    <span className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                        <Navigation size={13} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
+                                        <span className="truncate">Desde {activeBase.name}</span>
+                                    </span>
+                                    {fmtDist(dist?.distanceMeters) && (
+                                        <span className="text-caption text-tertiary" style={{ flexShrink: 0 }}>{fmtDist(dist.distanceMeters)}</span>
+                                    )}
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    {[
+                                        { Icon: Car, sec: dist?.drivingDurationSeconds, label: 'Coche' },
+                                        { Icon: Footprints, sec: dist?.walkingDurationSeconds, label: 'A pie' },
+                                        { Icon: Bus, sec: dist?.transitDurationSeconds, label: 'Transporte' },
+                                    ].map((m) => (
+                                        <div key={m.label} title={m.label} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 'var(--radius-full)', background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+                                            <m.Icon size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                                            <span className="text-caption" style={{ fontWeight: 700, color: m.sec != null ? 'var(--text-primary)' : 'var(--text-tertiary)' }}>
+                                                {m.sec != null ? formatDuration(m.sec) : (apiIsLoaded ? '…' : '—')}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         )}
 
@@ -318,6 +417,19 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                                 >
                                     {poi.website.replace(/^https?:\/\//, '').split('/')[0]}
                                 </a>
+                            </div>
+                        )}
+
+                        {(poi.reservas || poi.reservaUrl || poi.requiereCita) && (
+                            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                                <Ticket size={16} style={{ color: 'var(--color-gold)', flexShrink: 0, marginTop: 2 }} />
+                                <span className="text-body text-secondary">
+                                    {poi.requiereCita ? 'Requiere cita previa. ' : ''}
+                                    {typeof poi.reservas === 'string' ? poi.reservas : (poi.reservas ? 'Se recomienda reservar. ' : '')}
+                                    {poi.reservaUrl && (
+                                        <a href={poi.reservaUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-primary)' }}>Reservar aquí</a>
+                                    )}
+                                </span>
                             </div>
                         )}
 
@@ -369,25 +481,38 @@ export default function PoiDetailModal({ poi, trip, onClose, onDelete, onUpdate 
                     )}
 
                     {/* CTA Buttons */}
-                    <div style={{ display: 'flex', gap: 10 }}>
-                        <a
-                            href={mapsUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn btn-primary"
-                            style={{ flex: 1, textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                        >
-                            <Navigation size={16} /> Cómo llegar
-                        </a>
-                        <a
-                            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(poi.name)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn btn-outline"
-                            style={{ flex: 1, textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                        >
-                            <ExternalLink size={16} /> Ver en Maps
-                        </a>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {/* Ver en NUESTRO mapa: centra, selecciona el marcador y abre el mapa interno. */}
+                        {typeof onShowOnMap === 'function' && poi.lat != null && (
+                            <button
+                                type="button"
+                                className="btn btn-primary"
+                                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                                onClick={() => { onShowOnMap(poi); onClose(); }}
+                            >
+                                <MapIconLucide size={16} /> Ver en nuestro mapa
+                            </button>
+                        )}
+                        <div style={{ display: 'flex', gap: 10 }}>
+                            <a
+                                href={mapsUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="btn btn-outline"
+                                style={{ flex: 1, textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                            >
+                                <Navigation size={16} /> Cómo llegar
+                            </a>
+                            <a
+                                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(poi.name)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="btn btn-outline"
+                                style={{ flex: 1, textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                            >
+                                <ExternalLink size={16} /> Abrir en Google Maps
+                            </a>
+                        </div>
                     </div>
                 </div>
             </div>
