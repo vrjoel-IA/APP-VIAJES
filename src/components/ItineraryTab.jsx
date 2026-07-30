@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
-    Plus, Trash2, Navigation, Clock, CheckCircle2, Utensils,
-    Map, ExternalLink, Edit3, X, Sparkles, Star, PartyPopper, GripVertical
+    Plus, Trash2, Navigation, Clock, Utensils,
+    Map, ExternalLink, Edit3, X, Sparkles, PartyPopper, GripVertical,
+    Search, Calendar, Lightbulb, AlertTriangle
 } from 'lucide-react';
-import { useApiIsLoaded } from '@vis.gl/react-google-maps';
+import { useApiIsLoaded, Map as GMap, AdvancedMarker, InfoWindow } from '@vis.gl/react-google-maps';
 import {
     DndContext, closestCenter, PointerSensor, TouchSensor, KeyboardSensor, useSensor, useSensors
 } from '@dnd-kit/core';
@@ -11,99 +12,46 @@ import {
     SortableContext, verticalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { formatDuration, CATEGORY_MAP } from '../utils/constants';
+import { formatDuration, CATEGORY_MAP, getPlaceholderImage } from '../utils/constants';
 import { haversineMeters } from '../lib/tripSchema';
-import { searchNearbyRestaurant } from '../lib/places';
+import { searchNearbyRestaurant, searchPlacesByText } from '../lib/places';
+import { parseNotes } from '../lib/notesFormat';
 import { generateAiItinerary, resolveSuggestions } from '../lib/ai';
 import { toast } from '../lib/toast';
 import PoiDetailModal from './PoiDetailModal';
 
-// Preferencias rápidas para la IA: cada chip añade una frase a las indicaciones.
-const PREF_CHIPS = [
-    { key: 'temprano', label: '🌅 Empezar temprano', phrase: 'Empieza el día temprano.' },
-    { key: 'relajado', label: '🧘 Ritmo relajado', phrase: 'Quiero un ritmo relajado, sin prisas ni demasiadas paradas.' },
-    { key: 'pocoandar', label: '🚶 Poco caminar', phrase: 'No quiero caminar más de 20 minutos entre paradas.' },
-    { key: 'sincuestas', label: '⛰️ Evita cuestas', phrase: 'Evita cuestas y desniveles pronunciados.' },
-    { key: 'playa', label: '🏖️ Prioriza playas', phrase: 'Prioriza playas y costa.' },
-    { key: 'naturaleza', label: '🌿 Prioriza naturaleza', phrase: 'Prioriza naturaleza y paisajes.' },
-    { key: 'cultura', label: '🏛️ Prioriza cultura', phrase: 'Prioriza monumentos, museos y cultura.' },
-    { key: 'gastro', label: '🍽️ Prioriza gastronomía', phrase: 'Da protagonismo a la gastronomía local.' },
-    { key: 'ninos', label: '🧒 Con niños', phrase: 'Viajo con niños: evita planes largos o muy exigentes.' },
-    { key: 'comer14', label: '🍴 Comer ~14:00', phrase: 'Quiero comer sobre las 14:00.' },
-];
+// Colores del estado de un lugar en el mini-mapa y la lista.
+const PIN_UNSET = '#94a3b8';   // gris: sin elegir
+const PIN_FIXED = '#4a63e7';   // azul: fijado a este día
+const PIN_OTHER = '#10b981';   // verde: asignado a otro día
 
-// Fila reordenable del editor de itinerario (arrastrar y soltar, táctil incluido).
-function SortableStep({ step, idx, total, onDelete, onTimeChange }) {
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: step.dndId });
-    const style = {
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.6 : 1,
-        zIndex: isDragging ? 2 : 1,
-    };
-    return (
-        <div ref={setNodeRef} style={style} className="card" >
-            <div style={{ padding: '10px 12px', display: 'flex', gap: 10, alignItems: 'center' }}>
-                <button
-                    type="button"
-                    className="dnd-handle"
-                    {...attributes}
-                    {...listeners}
-                    aria-label="Arrastrar para reordenar"
-                    style={{ cursor: 'grab', touchAction: 'none', color: 'var(--text-tertiary)', background: 'none', border: 'none', display: 'flex', flexShrink: 0, padding: 2 }}
-                >
-                    <GripVertical size={16} />
-                </button>
-                <span style={{ fontSize: '16px', flexShrink: 0 }}>{step.icon || '📍'}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="text-body truncate" style={{ fontWeight: 600, fontSize: '13px' }}>{step.name}</div>
-                    <input
-                        type="time"
-                        value={step.time || ''}
-                        onChange={e => onTimeChange(idx, e.target.value)}
-                        style={{ fontSize: '12px', color: 'var(--color-primary)', fontWeight: 700, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
-                    />
-                </div>
-                <button
-                    onClick={() => onDelete(idx)}
-                    aria-label="Eliminar parada"
-                    style={{ padding: 6, borderRadius: 6, background: '#fee2e2', border: 'none', cursor: 'pointer', color: '#ef4444', flexShrink: 0 }}
-                    disabled={total <= 1}
-                ><X size={14} /></button>
-            </div>
-        </div>
-    );
-}
-
-// Visit duration in hours by category (default estimates)
+// Duración de visita por categoría (estimación por defecto, en horas).
 const VISIT_DURATION = {
-    beach: 2.5,
-    culture: 1.5,
-    nature: 3.5,
-    mirador: 0.75,
-    food: 1,
-    other: 1,
+    beach: 2.5, culture: 1.5, monument: 1.5, museo: 1.5, pueblo: 2, ciudad: 3,
+    nature: 3.5, mirador: 0.75, ruta: 3, food: 1, other: 1.5,
 };
 
 function addMinutes(timeStr, minutes) {
-    const [h, m] = timeStr.split(':').map(Number);
+    const [h, m] = (timeStr || '09:00').split(':').map(Number);
     const totalMins = h * 60 + m + Math.round(minutes);
     const newH = Math.floor(totalMins / 60) % 24;
     const newM = totalMins % 60;
     return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
 }
 
-function timeToMins(timeStr) {
-    const [h, m] = timeStr.split(':').map(Number);
-    return h * 60 + m;
-}
-
 function categoryEmoji(cat) {
-    const map = { beach: '🏖️', culture: '🏛️', food: '🍽️', nature: '🌿', other: '📍' };
-    return map[cat] || '📍';
+    return CATEGORY_MAP[cat]?.emoji || '📍';
 }
 
-// Build Google Maps directions deep-link for a full itinerary
+// Zona de un lugar: la comarca de sus notas (Datos prácticos) o, si no, el municipio.
+function getZona(poi) {
+    const blocks = parseNotes(poi.notas);
+    const datos = blocks.find(b => b.pairs);
+    const comarca = datos?.pairs.find(p => /comarca/i.test(p.k))?.v;
+    return (comarca || poi.municipio || 'Otra zona').trim();
+}
+
+// Deep-link a Google Maps con la ruta completa (para abrir fuera).
 function buildMapsUrl(startLoc, optimizedPois, endLoc) {
     if (!startLoc || !endLoc || !optimizedPois?.length) return null;
     const origin = encodeURIComponent(`${startLoc.lat},${startLoc.lng}`);
@@ -112,519 +60,263 @@ function buildMapsUrl(startLoc, optimizedPois, endLoc) {
     return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${waypoints}&travelmode=driving`;
 }
 
-export default function ItineraryTab({ trip, store, onShowOnMap }) {
-    const [editingDay, setEditingDay] = useState(null);
-    const [generating, setGenerating] = useState(false);
-    const [editingItinerary, setEditingItinerary] = useState(null); // id of itinerary being edited
-    const [poiDetail, setPoiDetail] = useState(null);
-    const apiIsLoaded = useApiIsLoaded();
+// Fecha ISO (yyyy-mm-dd) legible: "18 ago".
+function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso + 'T00:00:00');
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+}
 
-    // Form state
+// Fila reordenable del editor de itinerario (arrastrar y soltar, táctil incluido).
+function SortableStep({ step, idx, total, onDelete, onTimeChange }) {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: step.dndId });
+    const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.6 : 1, zIndex: isDragging ? 2 : 1 };
+    return (
+        <div ref={setNodeRef} style={style} className="card">
+            <div style={{ padding: '10px 12px', display: 'flex', gap: 10, alignItems: 'center' }}>
+                <button type="button" className="dnd-handle" {...attributes} {...listeners} aria-label="Arrastrar para reordenar"
+                    style={{ cursor: 'grab', touchAction: 'none', color: 'var(--text-tertiary)', background: 'none', border: 'none', display: 'flex', flexShrink: 0, padding: 2 }}>
+                    <GripVertical size={16} />
+                </button>
+                <span style={{ fontSize: '16px', flexShrink: 0 }}>{step.icon || '📍'}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="text-body truncate" style={{ fontWeight: 600, fontSize: '13px' }}>{step.name}</div>
+                    <input type="time" value={step.time || ''} onChange={e => onTimeChange(idx, e.target.value)}
+                        style={{ fontSize: '12px', color: 'var(--color-primary)', fontWeight: 700, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }} />
+                </div>
+                <button onClick={() => onDelete(idx)} aria-label="Eliminar parada" disabled={total <= 1}
+                    style={{ padding: 6, borderRadius: 6, background: '#fee2e2', border: 'none', cursor: 'pointer', color: '#ef4444', flexShrink: 0 }}>
+                    <X size={14} />
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// Badge del origen de una parada en el itinerario generado.
+function OrigenBadge({ origen, fecha }) {
+    if (origen === 'fijado') return <span className="chip" style={{ fontSize: 10, padding: '2px 8px', background: 'var(--color-primary-light)', color: 'var(--color-primary)', fontWeight: 800 }}>📌 Tuyo</span>;
+    if (origen === 'evento_fecha') return <span className="chip" style={{ fontSize: 10, padding: '2px 8px', background: 'var(--color-gold-light)', color: 'var(--color-gold)', fontWeight: 800 }}>🎪 Evento{fecha ? ` · ${fmtDate(fecha)}` : ''}</span>;
+    if (origen === 'ia') return <span className="chip" style={{ fontSize: 10, padding: '2px 8px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontWeight: 800 }}>✨ IA</span>;
+    return null;
+}
+
+export default function ItineraryTab({ trip, store, onShowOnMap }) {
+    const apiIsLoaded = useApiIsLoaded();
+    const itineraries = trip.itineraries || [];
+    const poiById = (id) => trip.pois.find(p => p.id === id);
+
+    // ----- Estado del planificador -----
+    const [editingDay, setEditingDay] = useState(null);      // id/flag del día en edición (planner abierto)
+    const [editingItinerary, setEditingItinerary] = useState(null); // id de itinerario en edición (DnD)
+    const [editTimeline, setEditTimeline] = useState(null);
+    const [poiDetail, setPoiDetail] = useState(null);
+
     const [title, setTitle] = useState('');
+    const [dayDate, setDayDate] = useState('');
     const [startTime, setStartTime] = useState('09:00');
     const [startId, setStartId] = useState('');
     const [endId, setEndId] = useState('');
-    const [selectedPois, setSelectedPois] = useState([]);
-    const [visitHours, setVisitHours] = useState({});
-    const [travelModes, setTravelModes] = useState({});
-    const [mealTypes, setMealTypes] = useState({}); // poiId -> 'Almuerzo' | 'Cena'
+    const [mode, setMode] = useState('completar');           // 'completar' | 'ordenar'
+    const [fixedIds, setFixedIds] = useState([]);            // poiIds fijados a ESTE día
+    const [fixedEvents, setFixedEvents] = useState([]);      // nombres de eventos fijados
+    const [zoneFilter, setZoneFilter] = useState('all');
+    const [search, setSearch] = useState('');
+    const [aiInstructions, setAiInstructions] = useState('');
+    const [aiDays, setAiDays] = useState(1);
 
-    // Edit mode state
-    const [editTimeline, setEditTimeline] = useState(null); // copy of timeline being edited
+    const [mapPopupId, setMapPopupId] = useState(null);      // poi mostrado en el popup del mini-mapa
+    const [eventsOpen, setEventsOpen] = useState(false);
 
-    // AI state
     const [aiLoading, setAiLoading] = useState(false);
-    const [aiInstructions, setAiInstructions] = useState(''); // indicaciones libres del usuario para la IA
-    const [aiPrefs, setAiPrefs] = useState({}); // preferencias rápidas (chips) -> frases para la IA
-    const [aiDays, setAiDays] = useState(1); // nº de días a planificar de una vez
-    const [aiSuggestions, setAiSuggestions] = useState([]); // lugares nuevos sugeridos por la IA (resueltos con Google)
-    const [aiEvents, setAiEvents] = useState([]); // fiestas/eventos locales detectados para las fechas del viaje
-    const [catFilter, setCatFilter] = useState('all'); // filtro de categoría en la selección manual de lugares
+    const [searchLoading, setSearchLoading] = useState(false);
+    const [searchSug, setSearchSug] = useState([]);          // sugerencias de la IA para la búsqueda
+    const [aiSuggestions, setAiSuggestions] = useState([]);  // sugerencias tras generar
+    const [aiEvents, setAiEvents] = useState([]);
 
-    // Sensores DnD: puntero (ratón) y táctil (móvil, con retardo para no chocar con el scroll).
+    // ----- Sensores DnD -----
     const sensors = useSensors(
         useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
         useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
         useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
     );
 
-    // Frases de preferencias activas + texto libre -> indicaciones que recibe la IA.
-    const buildInstructions = () => {
-        const phrases = PREF_CHIPS.filter(c => aiPrefs[c.key]).map(c => c.phrase);
-        const free = aiInstructions.trim();
-        if (free) phrases.push(free);
-        return phrases.join(' ');
-    };
-
-    // Reordena la timeline manteniendo la salida al principio y la llegada al final.
-    const pinEnds = (list) => {
-        const dep = list.filter(s => s.type === 'departure');
-        const arr = list.filter(s => s.type === 'arrival');
-        const mid = list.filter(s => s.type !== 'departure' && s.type !== 'arrival');
-        return [...dep, ...mid, ...arr];
-    };
-
-    const handleDragEnd = (event) => {
-        const { active, over } = event;
-        if (!over || active.id === over.id) return;
-        setEditTimeline(prev => {
-            const oldIdx = prev.findIndex(s => s.dndId === active.id);
-            const newIdx = prev.findIndex(s => s.dndId === over.id);
-            if (oldIdx < 0 || newIdx < 0) return prev;
-            const moved = pinEnds(arrayMove(prev, oldIdx, newIdx));
-            return recalcTimesFrom(moved, 0);
-        });
-    };
-
-    const itineraries = trip.itineraries || [];
     const allLocations = [
         ...trip.accommodations.filter(a => a.isActive !== false).map(a => ({ ...a, type: 'accommodation', label: `🏨 ${a.name}` })),
-        ...trip.pois.filter(p => p.isActive !== false).map(p => ({ ...p, type: 'poi', label: `📍 ${p.name}` }))
+        ...trip.pois.filter(p => p.isActive !== false).map(p => ({ ...p, type: 'poi', label: `📍 ${p.name}` })),
     ];
 
-    const poiById = (id) => trip.pois.find(p => p.id === id);
+    // ----- Derivados: zona por lugar, zonas del viaje, asignaciones a días -----
+    const activePois = useMemo(() => trip.pois.filter(p => p.isActive !== false && !p.descartado), [trip.pois]);
 
-    // Estimación rápida de un día-semilla (sin llamar a Google): tiempo de visita
-    // (duracion_estimada_min o un valor por categoría) + conducción en línea recta a 45 km/h.
-    const RECOMMENDED_DAY_MIN = 10 * 60; // 10 h de actividad = día cargado
-    const estimateSeedDay = (day) => {
-        const stops = (day.paradas || []).map(poiById).filter(Boolean);
-        const base = trip.accommodations.find(a => a.id === day.baseId)
-            || trip.accommodations.find(a => a.id === trip.selectedAccommodation)
-            || trip.accommodations.find(a => a.isActive !== false);
-        const visitMin = stops.reduce((sum, p) =>
-            sum + (p.duracionEstimadaMin || (VISIT_DURATION[p.category] || 1.5) * 60), 0);
-        const seq = [base, ...stops, base].filter(Boolean);
-        let driveMin = 0;
-        for (let i = 0; i < seq.length - 1; i++) {
-            const m = haversineMeters(seq[i], seq[i + 1]);
-            if (m !== Infinity) driveMin += (m / 1000) / 45 * 60;
-        }
-        const totalMin = visitMin + driveMin;
-        return { stops, visitMin, driveMin, totalMin, overBudget: totalMin > RECOMMENDED_DAY_MIN };
-    };
+    const zonaByPoi = useMemo(() => {
+        const m = {};
+        activePois.forEach(p => { m[p.id] = getZona(p); });
+        return m;
+    }, [activePois]);
 
-    // Eventos del viaje que caen en la fecha de un día-semilla (para anclarlos y avisar).
-    const eventsForDay = (day) => {
-        if (!day.fecha) return [];
+    const zones = useMemo(() => {
+        const counts = {};
+        activePois.forEach(p => { const z = zonaByPoi[p.id]; counts[z] = (counts[z] || 0) + 1; });
+        return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+    }, [activePois, zonaByPoi]);
+
+    // poiId -> nº de día al que ya está asignado (según los timelines existentes).
+    const assignedByPoi = useMemo(() => {
+        const m = {};
+        itineraries.forEach((it, idx) => (it.timeline || []).forEach(s => {
+            if (s.type === 'poi' && s.poiId) m[s.poiId] = idx + 1;
+        }));
+        return m;
+    }, [itineraries]);
+
+    // Eventos del viaje que coinciden con la fecha elegida.
+    const eventsForDate = useMemo(() => {
+        if (!dayDate) return [];
         return (trip.eventos || []).filter(e => {
             const ini = e.fechaInicio || e.fechaFin;
             const fin = e.fechaFin || e.fechaInicio;
             if (!ini) return false;
-            return day.fecha >= ini && day.fecha <= fin;
+            return dayDate >= ini && dayDate <= fin;
         });
+    }, [dayDate, trip.eventos]);
+
+    // ----- Abrir el planificador -----
+    const nextDayDate = (dayNumber) => {
+        if (!trip.startDate) return '';
+        const d = new Date(trip.startDate + 'T00:00:00');
+        if (isNaN(d)) return '';
+        d.setDate(d.getDate() + (dayNumber - 1));
+        return d.toISOString().slice(0, 10);
     };
 
-    // Abre el planificador con las paradas del día-semilla ya seleccionadas.
-    const handlePlanSeedDay = (day) => {
-        setEditingDay(day.id);
-        setTitle(day.title || `Día ${day.dia || ''}`.trim());
-        const startPoint = day.baseId || trip.selectedAccommodation || '';
-        setStartId(startPoint);
-        setEndId(startPoint);
-        const validPois = (day.paradas || []).filter(id => trip.pois.some(p => p.id === id && p.isActive !== false));
-        setSelectedPois(validPois);
-        const vh = {};
-        validPois.forEach(id => { const p = poiById(id); if (p?.duracionEstimadaMin) vh[id] = Math.round(p.duracionEstimadaMin / 60 * 10) / 10; });
-        setVisitHours(vh);
-        setTravelModes({});
-        setMealTypes({});
+    const openPlanner = (preset = {}) => {
+        const dayNumber = preset.dayNumber ?? itineraries.length + 1;
+        setEditingDay(preset.id || Date.now().toString());
+        setTitle(preset.title || `Día ${dayNumber}`);
+        setDayDate(preset.fecha || nextDayDate(dayNumber));
         setStartTime('09:00');
+        const base = preset.baseId || trip.selectedAccommodation || (trip.accommodations.find(a => a.isActive !== false)?.id) || '';
+        setStartId(base);
+        setEndId(base);
+        setMode('completar');
+        setFixedIds(preset.fixedIds || []);
+        setFixedEvents([]);
+        setZoneFilter('all');
+        setSearch(''); setSearchSug([]);
+        setAiInstructions('');
+        setAiDays(1);
+        setMapPopupId(null);
         setEditingItinerary(null);
     };
 
-    const togglePoiSelection = (poiId) => {
-        setSelectedPois(prev =>
-            prev.includes(poiId) ? prev.filter(id => id !== poiId) : [...prev, poiId]
-        );
-    };
+    const handleCreateNew = () => openPlanner();
 
-    const handleCreateNew = () => {
-        setEditingDay(Date.now().toString());
-        setTitle(`Día ${itineraries.length + 1}`);
-        setStartId(trip.selectedAccommodation || '');
-        setEndId(trip.selectedAccommodation || '');
-        setSelectedPois([]);
-        setVisitHours({});
-        setTravelModes({});
-        setMealTypes({});
-        setStartTime('09:00');
-        setEditingItinerary(null);
-    };
+    // Día-semilla importado: abrir con sus paradas ya fijadas.
+    const handlePlanSeedDay = (day) => openPlanner({
+        id: day.id, title: day.title || `Día ${day.dia || ''}`.trim(), fecha: day.fecha, baseId: day.baseId,
+        fixedIds: (day.paradas || []).filter(id => activePois.some(p => p.id === id)),
+    });
 
-    const handleEditExisting = (itinerary) => {
-        setEditingItinerary(itinerary.id);
-        // Copia profunda + id estable por paso (necesario para el arrastrar/soltar).
-        const copy = (itinerary.timeline || []).map((s, i) => ({
-            ...JSON.parse(JSON.stringify(s)),
-            dndId: `step-${i}-${Math.random().toString(36).slice(2, 8)}`,
-        }));
-        setEditTimeline(copy);
-    };
-
-    const saveEditedItinerary = (itineraryId) => {
-        const idx = itineraries.findIndex(i => i.id === itineraryId);
-        if (idx < 0) return;
-        const updated = [...itineraries];
-        // Quitamos el id auxiliar de arrastre antes de persistir.
-        const cleanTimeline = editTimeline.map(({ dndId, ...rest }) => rest); // eslint-disable-line no-unused-vars
-        updated[idx] = { ...updated[idx], timeline: cleanTimeline };
-        store.updateTrip(trip.id, { itineraries: updated });
-        setEditingItinerary(null);
-        setEditTimeline(null);
-    };
-
-    // Recalculate timeline times starting from a given index.
-    // After the anchor step at anchorIdx (which keeps its time),
-    // propagates visit durations and transport times forward.
-    const recalcTimesFrom = (timeline, anchorIdx) => {
-        const updated = [...timeline];
-        let currentTime = updated[anchorIdx].time;
-
-        for (let i = anchorIdx; i < updated.length; i++) {
-            const step = updated[i];
-            // Set arrival time for this step
-            updated[i] = { ...step, time: currentTime };
-
-            const visitMins = (step.visitHours || 0) * 60;
-            const mealMins = step.type === 'meal'
-                ? (step.mealTime === 'Cena' ? 90 : 75)
-                : 0;
-            const travelMins = step.type === 'departure' && step.leg
-                ? step.leg.durationMins
-                : (step.leg?.durationMins || 0);
-
-            if (step.type === 'poi') {
-                currentTime = addMinutes(currentTime, visitMins || 90);
-                // Add travel to next if available
-                const nextLeg = updated[i + 1]?.leg;
-                if (nextLeg) currentTime = addMinutes(currentTime, nextLeg.durationMins);
-            } else if (step.type === 'meal') {
-                currentTime = addMinutes(currentTime, mealMins);
-            } else if (step.type === 'departure') {
-                currentTime = addMinutes(currentTime, travelMins);
-            }
-            // arrival stays as is (last step)
+    // ----- Fijar / quitar un lugar del día -----
+    const toggleFixed = (poiId) => {
+        const otherDay = assignedByPoi[poiId];
+        const isFixed = fixedIds.includes(poiId);
+        if (!isFixed && otherDay && otherDay !== itineraries.findIndex(i => i.id === editingDay) + 1) {
+            if (!confirm(`Este lugar ya está en el Día ${otherDay}. ¿Fijarlo también a este día?`)) return;
         }
-        return updated;
+        setFixedIds(prev => prev.includes(poiId) ? prev.filter(id => id !== poiId) : [...prev, poiId]);
     };
 
-    const updateStepTime = (idx, newTime) => {
-        const newTimeline = [...editTimeline];
-        newTimeline[idx] = { ...newTimeline[idx], time: newTime };
-        // Recalculate all steps AFTER this one
-        const recalced = recalcTimesFrom(newTimeline, idx);
-        setEditTimeline(recalced);
-    };
-
-    const deleteStep = (idx) => {
-        setEditTimeline(prev => prev.filter((_, i) => i !== idx));
-    };
-
-    const deleteItinerary = (id) => {
-        if (!confirm('¿Eliminar este itinerario?')) return;
-        store.updateTrip(trip.id, {
-            itineraries: itineraries.filter(i => i.id !== id)
-        });
-    };
-
-    // `opts` permite generar con una selección explícita (la IA la pasa directamente
-    // sin esperar a que el estado de React se actualice). Por defecto usa el formulario.
-    const generateRoute = async (opts = null) => {
-        const poiIds = opts?.poiIds ?? selectedPois;
-        const vh = opts?.visitHoursMap ?? visitHours;
-        const mt = opts?.mealTypesMap ?? mealTypes;
-        const dayTitle = opts?.title ?? title;
-
-        if (!startId || !endId || poiIds.length === 0) {
-            return toast('Selecciona punto de salida, llegada y al menos 1 lugar.', 'info');
-        }
-        if (!apiIsLoaded) return toast('Google Maps aún no ha cargado. Espera un momento.', 'info');
-
-        setGenerating(true);
-
-        const startLoc = allLocations.find(l => l.id === startId);
-        const endLoc = allLocations.find(l => l.id === endId);
-        const wps = poiIds.map(id => trip.pois.find(p => p.id === id)).filter(Boolean);
-
-        const ds = new window.google.maps.DirectionsService();
-
-        const foodWps = wps.filter(w => w.category === 'food');
-        const routeWps = wps.filter(w => w.category !== 'food');
-
-        const lunchPoi = foodWps.find(w => mt[w.id] === 'Almuerzo') || foodWps[0];
-        const dinnerPoi = foodWps.find(w => mt[w.id] === 'Cena' || (w !== lunchPoi)) || (lunchPoi ? foodWps[1] : foodWps[0]);
-
+    // ----- Buscador con sugerencias de IA/Places -----
+    const runSearch = async () => {
+        const q = search.trim();
+        if (!q) { setSearchSug([]); return; }
+        if (!apiIsLoaded) return;
+        setSearchLoading(true);
         try {
-            let optimizedPois = [];
-            if (routeWps.length > 0) {
-                const routeResult = await new Promise((resolve, reject) => {
-                    ds.route({
-                        origin: { lat: startLoc.lat, lng: startLoc.lng },
-                        destination: { lat: endLoc.lat, lng: endLoc.lng },
-                        waypoints: routeWps.map(w => ({ location: { lat: w.lat, lng: w.lng }, stopover: true })),
-                        optimizeWaypoints: true,
-                        travelMode: 'DRIVING'
-                    }, (res, status) => {
-                        if (status === 'OK') resolve(res);
-                        else reject(new Error(status));
-                    });
-                });
-                const order = routeResult.routes[0].waypoint_order;
-                optimizedPois = order.map(i => routeWps[i]);
-            }
-
-            // Estimate times for sequence building
-            let currentMins = timeToMins(startTime);
-            const sequence = [];
-            let lunchInserted = false;
-            let dinnerInserted = false;
-
-            for (let i = 0; i < optimizedPois.length; i++) {
-                const poi = optimizedPois[i];
-                if (!lunchInserted && lunchPoi && currentMins >= 12 * 60 + 30) {
-                    sequence.push({ ...lunchPoi, isMeal: true, mealTime: 'Almuerzo' });
-                    currentMins += 90;
-                    lunchInserted = true;
-                }
-                if (!dinnerInserted && dinnerPoi && currentMins >= 19 * 60 + 30) {
-                    sequence.push({ ...dinnerPoi, isMeal: true, mealTime: 'Cena' });
-                    currentMins += 90;
-                    dinnerInserted = true;
-                }
-                sequence.push(poi);
-                currentMins += ((vh[poi.id] || VISIT_DURATION[poi.category] || 1.5) * 60) + 15;
-            }
-
-            if (!lunchInserted && lunchPoi) sequence.push({ ...lunchPoi, isMeal: true, mealTime: 'Almuerzo' });
-            if (!dinnerInserted && dinnerPoi) sequence.push({ ...dinnerPoi, isMeal: true, mealTime: 'Cena' });
-
-            const placesSequence = [...sequence, { id: 'end', lat: endLoc.lat, lng: endLoc.lng, isEnd: true }];
-
-            // Calculate exact travel legs for the final sequence
-            const legs = [];
-            let currentLoc = { lat: startLoc.lat, lng: startLoc.lng };
-
-            for (const place of placesSequence) {
-                const mode = place.isEnd ? 'DRIVING' : (travelModes[place.id] || 'DRIVING');
-                try {
-                    const legRes = await new Promise(resolve => {
-                        ds.route({
-                            origin: currentLoc,
-                            destination: { lat: place.lat, lng: place.lng },
-                            travelMode: mode
-                        }, (res, status) => {
-                            if (status === 'OK') resolve(res.routes[0].legs[0]);
-                            else resolve(null);
-                        });
-                    });
-
-                    if (legRes) {
-                        legs.push({
-                            durationText: legRes.duration.text,
-                            distanceText: legRes.distance.text,
-                            durationSec: legRes.duration.value,
-                            durationMins: legRes.duration.value / 60,
-                            mode: mode,
-                            icon: mode === 'WALKING' ? '🚶' : mode === 'TRANSIT' ? '🚌' : mode === 'BICYCLING' ? '🚲' : '🚗'
-                        });
-                    } else throw new Error();
-                } catch {
-                    legs.push({ durationText: '10 min', distanceText: '---', durationSec: 600, durationMins: 10, mode: mode, icon: '🚗' });
-                }
-                currentLoc = { lat: place.lat, lng: place.lng };
-                await new Promise(r => setTimeout(r, 200));
-            }
-
-            let currentTime = startTime;
-            const timeline = [];
-
-            timeline.push({ type: 'departure', time: currentTime, name: startLoc?.name || 'Punto de partida', icon: '🚗' });
-            currentTime = addMinutes(currentTime, legs[0].durationMins);
-
-            let hasLunch = !!lunchPoi;
-            let hasDinner = !!dinnerPoi;
-
-            for (let i = 0; i < sequence.length; i++) {
-                const place = sequence[i];
-
-                if (place.isMeal) {
-                    timeline.push({
-                        type: 'meal',
-                        mealTime: place.mealTime,
-                        time: currentTime,
-                        name: `🍴 ${place.name}`,
-                        rating: place.rating,
-                        vicinity: place.address || place.vicinity || '',
-                        lat: place.lat,
-                        lng: place.lng,
-                        icon: '🍴',
-                        leg: legs[i + 1],
-                    });
-                    currentTime = addMinutes(currentTime, place.mealTime === 'Cena' ? 90 : 75);
-                    if (legs[i + 1]) currentTime = addMinutes(currentTime, legs[i + 1].durationMins);
-                } else {
-                    const visitMins = (vh[place.id] || VISIT_DURATION[place.category] || 1.5) * 60;
-                    timeline.push({
-                        type: 'poi',
-                        time: currentTime,
-                        name: place.name,
-                        category: place.category,
-                        visitHours: vh[place.id] || VISIT_DURATION[place.category] || 1.5,
-                        icon: categoryEmoji(place.category),
-                        lat: place.lat,
-                        lng: place.lng,
-                        poiId: place.id,
-                        rating: place.rating,
-                        visitDurationText: vh[place.id] ? `${vh[place.id]}h visita` : `~${VISIT_DURATION[place.category] || 1.5}h estimada`,
-                        leg: legs[i + 1],
-                    });
-                    currentTime = addMinutes(currentTime, visitMins);
-                    const currentMins = timeToMins(currentTime);
-
-                    // Dynamic API Search Lunch if NOT provided by user
-                    if (!hasLunch && currentMins >= 12 * 60 && currentMins <= 15 * 60) {
-                        hasLunch = true;
-                        let restaurant = null;
-                        try {
-                            restaurant = await searchNearbyRestaurant({ lat: place.lat, lng: place.lng }, 1000);
-                        } catch { /* sin restaurante: se usa el lugar como fallback */ }
-
-                        timeline.push({
-                            type: 'meal', mealTime: 'Almuerzo', time: currentTime,
-                            name: restaurant ? `🍴 ${restaurant.name}` : '🍴 Busca un restaurante cercano',
-                            rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
-                            lat: restaurant?.lat || place.lat, lng: restaurant?.lng || place.lng,
-                            icon: '🍴',
-                        });
-                        currentTime = addMinutes(currentTime, 75);
-                    }
-
-                    // Dynamic API Search Dinner if NOT provided by user
-                    if (!hasDinner && currentMins >= 19 * 60 + 30 && currentMins <= 22 * 60 + 30) {
-                        hasDinner = true;
-                        let restaurant = null;
-                        try {
-                            restaurant = await searchNearbyRestaurant({ lat: place.lat, lng: place.lng }, 1500);
-                        } catch { /* sin restaurante: se usa el lugar como fallback */ }
-
-                        timeline.push({
-                            type: 'meal', mealTime: 'Cena', time: currentTime,
-                            name: restaurant ? `🍴 ${restaurant.name}` : '🍴 Busca un restaurante cercano',
-                            rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
-                            lat: restaurant?.lat || place.lat, lng: restaurant?.lng || place.lng,
-                            icon: '🍴',
-                        });
-                        currentTime = addMinutes(currentTime, 90);
-                    }
-                    if (legs[i + 1]) currentTime = addMinutes(currentTime, legs[i + 1].durationMins);
-                }
-            }
-
-            if (legs[sequence.length]) {
-                currentTime = addMinutes(currentTime, legs[sequence.length].durationMins);
-            }
-
-            timeline.push({
-                type: 'arrival',
-                time: currentTime,
-                name: endLoc?.name || 'Destino final',
-                icon: '🏁',
-            });
-
-            const newItinerary = {
-                id: editingDay,
-                title: dayTitle,
-                startTime,
-                startId,
-                endId,
-                startLoc,
-                endLoc,
-                optimizedPois,
-                legs,
-                timeline,
-                totalDurationSec: legs.reduce((a, b) => a + b.durationSec, 0)
-            };
-
-            const existingIndex = itineraries.findIndex(i => i.id === editingDay);
-            const updatedList = [...itineraries];
-            if (existingIndex >= 0) updatedList[existingIndex] = newItinerary;
-            else updatedList.push(newItinerary);
-
-            store.updateTrip(trip.id, { itineraries: updatedList });
-            setEditingDay(null);
-        } catch (err) {
-            toast(`No se pudo calcular la ruta (${err.message}). Comprueba que Directions API y Places API estén habilitadas en Google Cloud.`, 'error', 6000);
-        } finally {
-            setGenerating(false);
-        }
+            const bias = trip.destinationLat && trip.destinationLng ? { lat: trip.destinationLat, lng: trip.destinationLng } : null;
+            const results = await searchPlacesByText(`${q} ${trip.destination || ''}`.trim(), { locationBias: bias, limit: 4 });
+            const existing = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
+            setSearchSug(results.filter(r => !r.placeId || !existing.has(r.placeId)));
+        } catch { setSearchSug([]); }
+        finally { setSearchLoading(false); }
     };
 
-    // POIs ya usados en itinerarios existentes (no se reutilizan al generar con IA).
-    const getAssignedPoiIds = () => {
-        const ids = new Set();
-        itineraries.forEach(it => (it.timeline || []).forEach(step => {
-            if (step.type === 'poi' && step.poiId) ids.add(step.poiId);
-        }));
-        return ids;
+    // Añade una sugerencia del buscador al viaje y la deja fijada al día.
+    const addSearchSuggestion = (place) => {
+        const id = store.addPoi(trip.id, {
+            name: place.name, placeId: place.placeId, category: 'other',
+            lat: place.lat, lng: place.lng, address: place.address || '',
+            rating: place.rating || null, userRatingsTotal: place.userRatingsTotal || null,
+            photoUrl: place.photoUrl || null, photos: place.photos || [],
+            openingHours: place.openingHours || null, website: place.website || null,
+            phoneNumber: place.phoneNumber || null, priceLevel: place.priceLevel ?? null, types: place.types || [],
+        });
+        if (id) setFixedIds(prev => [...prev, id]);
+        setSearchSug(prev => prev.filter(s => s.placeId !== place.placeId));
+        setSearch('');
+        toast(`"${place.name}" añadido y fijado al día.`, 'success');
     };
 
-    // Construye el itinerario completo a partir del plan razonado de la IA:
-    // geolocaliza paradas, resuelve restaurantes y calcula trayectos con Google.
-    const buildAiItinerary = async (ai, startLoc, endLoc, candidates) => {
-        // OJO: en este archivo `Map` es el icono de lucide-react, no el Map de JS.
-        // Por eso usamos un objeto plano como índice de candidatos por id.
-        const candById = {};
-        candidates.forEach(c => { candById[c.id] = c; });
+    // ----- Generación con IA -----
+    const buildFromParadas = async (ai, startLoc, endLoc, candById) => {
         const ds = new window.google.maps.DirectionsService();
         const timeline = [];
         const optimizedPois = [];
         const geoPoints = [{ lat: startLoc.lat, lng: startLoc.lng }];
         const geoStepIdx = [];
+        let departureIdx = -1;
 
-        timeline.push({ type: 'departure', time: startTime, name: startLoc.name || 'Punto de partida', icon: '🚗' });
-        const departureIdx = timeline.length - 1;
+        const paradas = Array.isArray(ai.paradas) ? ai.paradas : [];
+        // Asegura una parada de inicio y otra de fin.
+        if (!paradas.some(p => p.tipo === 'inicio')) paradas.unshift({ tipo: 'inicio', hora: startTime, nombre: startLoc.name });
+        if (!paradas.some(p => p.tipo === 'fin')) paradas.push({ tipo: 'fin', hora: '', nombre: endLoc.name });
 
-        for (const item of (ai.timeline || [])) {
-            if (item.type === 'poi') {
-                const poi = candById[item.poiId];
-                if (!poi) continue;
-                const hrs = item.durationMins ? item.durationMins / 60 : (VISIT_DURATION[poi.category] || 1.5);
-                timeline.push({
-                    type: 'poi', time: item.startTime, name: poi.name, category: poi.category,
-                    visitHours: hrs, visitDurationText: `${Math.round(hrs * 10) / 10}h visita`,
-                    icon: categoryEmoji(poi.category), lat: poi.lat, lng: poi.lng, poiId: poi.id,
-                    rating: poi.rating, note: item.note || '',
-                });
-                optimizedPois.push({ lat: poi.lat, lng: poi.lng, name: poi.name });
-                geoPoints.push({ lat: poi.lat, lng: poi.lng });
-                geoStepIdx.push(timeline.length - 1);
-            } else if (item.type === 'meal') {
+        for (const it of paradas) {
+            const tipo = (it.tipo || '').toLowerCase();
+            if (tipo === 'inicio') {
+                timeline.push({ type: 'departure', time: it.hora || startTime, name: startLoc.name || it.nombre || 'Punto de partida', icon: '🚗' });
+                departureIdx = timeline.length - 1;
+            } else if (tipo === 'fin') {
+                timeline.push({ type: 'arrival', time: it.hora || startTime, name: endLoc.name || it.nombre || 'Destino final', icon: '🏁' });
+                geoPoints.push({ lat: endLoc.lat, lng: endLoc.lng });
+            } else if (tipo === 'comida') {
                 const near = geoPoints[geoPoints.length - 1];
                 let restaurant = null;
                 try { restaurant = await searchNearbyRestaurant(near, 1500); } catch { /* sin restaurante */ }
                 const lat = restaurant?.lat || near.lat;
                 const lng = restaurant?.lng || near.lng;
                 timeline.push({
-                    type: 'meal', mealTime: item.mealType || 'Comida', time: item.startTime,
-                    name: restaurant ? `🍴 ${restaurant.name}` : `🍴 ${item.name}`,
+                    type: 'meal', mealTime: it.nombre || 'Comida', time: it.hora,
+                    name: restaurant ? `🍴 ${restaurant.name}` : `🍴 ${it.nombre || 'Comida'}`,
                     rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
-                    lat, lng, icon: '🍴', note: item.note || '',
+                    lat, lng, icon: '🍴', note: it.motivo || '', origen: 'ia',
                 });
-                geoPoints.push({ lat, lng });
-                geoStepIdx.push(timeline.length - 1);
-            } else {
-                timeline.push({
-                    type: 'free', time: item.startTime, name: item.name, icon: '✨', note: item.note || '',
-                    visitDurationText: item.durationMins ? `${Math.round(item.durationMins / 60 * 10) / 10}h` : '',
-                });
+                geoPoints.push({ lat, lng }); geoStepIdx.push(timeline.length - 1);
+            } else if (tipo === 'lugar' || tipo === 'evento') {
+                const poi = it.poi_id ? candById[it.poi_id] : null;
+                if (poi && poi.lat != null) {
+                    const hrs = it.duracion_min ? it.duracion_min / 60 : (VISIT_DURATION[poi.category] || 1.5);
+                    timeline.push({
+                        type: 'poi', time: it.hora, name: poi.name, category: poi.category,
+                        visitHours: hrs, visitDurationText: `${Math.round(hrs * 10) / 10}h visita`,
+                        icon: tipo === 'evento' ? '🎪' : categoryEmoji(poi.category),
+                        lat: poi.lat, lng: poi.lng, poiId: poi.id, rating: poi.rating,
+                        note: it.motivo || '', descripcion: it.descripcion || '',
+                        origen: it.origen || (fixedIds.includes(poi.id) ? 'fijado' : 'ia'),
+                    });
+                    optimizedPois.push({ lat: poi.lat, lng: poi.lng, name: poi.name });
+                    geoPoints.push({ lat: poi.lat, lng: poi.lng }); geoStepIdx.push(timeline.length - 1);
+                } else {
+                    // Evento sin lugar geolocalizable: parada informativa.
+                    timeline.push({ type: 'free', time: it.hora, name: it.nombre, icon: tipo === 'evento' ? '🎪' : '✨', note: it.motivo || '', descripcion: it.descripcion || '', origen: it.origen || 'evento_fecha', eventoFecha: dayDate });
+                }
+            } else if (tipo !== 'trayecto') {
+                timeline.push({ type: 'free', time: it.hora, name: it.nombre, icon: '✨', note: it.motivo || '', origen: it.origen || 'ia' });
             }
         }
-
-        const last = ai.timeline?.[ai.timeline.length - 1];
-        const arrivalTime = last ? addMinutes(last.startTime, last.durationMins || 0) : startTime;
-        timeline.push({ type: 'arrival', time: arrivalTime, name: endLoc.name || 'Destino final', icon: '🏁' });
-        geoPoints.push({ lat: endLoc.lat, lng: endLoc.lng });
 
         // Trayectos reales entre puntos geolocalizados consecutivos.
         const legs = [];
@@ -639,107 +331,107 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
             legs.push(leg
                 ? { durationText: leg.duration.text, distanceText: leg.distance.text, durationSec: leg.duration.value, durationMins: leg.duration.value / 60, mode: 'DRIVING', icon: '🚗' }
                 : { durationText: '—', distanceText: '—', durationSec: 0, durationMins: 0, mode: 'DRIVING', icon: '🚗' });
-            await new Promise(r => setTimeout(r, 150));
+            await new Promise(r => setTimeout(r, 120));
         }
-        if (legs[0]) timeline[departureIdx].leg = legs[0];
+        if (departureIdx >= 0 && legs[0]) timeline[departureIdx].leg = legs[0];
         geoStepIdx.forEach((idx, k) => { if (legs[k + 1]) timeline[idx].leg = legs[k + 1]; });
 
         const totalDurationSec = legs.reduce((a, b) => a + (b.durationSec || 0), 0);
         return { timeline, optimizedPois, legs, totalDurationSec };
     };
 
-    const handleGenerateAI = async () => {
+    const canGenerate = () => {
+        if (!startId || !endId) return false;
+        if (mode === 'ordenar') return fixedIds.length >= 2;
+        return fixedIds.length > 0 || activePois.some(p => !assignedByPoi[p.id]);
+    };
+
+    const handleGenerate = async () => {
         if (!startId || !endId) return toast('Elige el punto de inicio y fin del día.', 'info');
         if (!apiIsLoaded) return toast('Google Maps aún cargando. Espera un momento.', 'info');
-
-        const assigned = getAssignedPoiIds();
-        let available = trip.pois.filter(p => p.isActive !== false && !assigned.has(p.id));
-        if (available.length === 0) {
-            return toast('No quedan lugares sin asignar. Añade más o edita un día existente.', 'info');
-        }
+        if (mode === 'ordenar' && fixedIds.length < 2) return toast('Fija al menos 2 lugares para el modo "Solo mis lugares".', 'info');
 
         const startLoc = allLocations.find(l => l.id === startId);
         const endLoc = allLocations.find(l => l.id === endId);
-        const instructions = buildInstructions();
         const nDays = Math.max(1, Math.min(14, parseInt(aiDays, 10) || 1));
-        const locationBias = trip.destinationLat && trip.destinationLng
-            ? { lat: trip.destinationLat, lng: trip.destinationLng }
-            : null;
+        const locationBias = trip.destinationLat && trip.destinationLng ? { lat: trip.destinationLat, lng: trip.destinationLng } : null;
+
+        // Instrucciones = texto libre + eventos fijados por el usuario.
+        let instructions = aiInstructions.trim();
+        if (fixedEvents.length) instructions += `${instructions ? ' ' : ''}Incluye sí o sí estos eventos: ${fixedEvents.join(', ')}.`;
 
         setAiLoading(true);
         const newDays = [];
+        const usedGlobal = new Set(); // ids usados en esta tanda (para varios días)
         const allEvents = [];
         let lastSuggestions = [];
         try {
-            for (let k = 0; k < nDays && available.length > 0; k++) {
+            for (let k = 0; k < nDays; k++) {
                 const dayNumber = itineraries.length + k + 1;
-                // Fecha concreta = inicio del viaje + (díaN - 1), para fiestas/eventos temporales.
-                let dayDate = null;
-                if (trip.startDate) {
-                    const d = new Date(trip.startDate);
-                    if (!isNaN(d)) { d.setDate(d.getDate() + (dayNumber - 1)); dayDate = d.toISOString().slice(0, 10); }
-                }
+                const date = k === 0 ? (dayDate || null) : (dayDate ? addDaysISO(dayDate, k) : null);
 
-                const candidates = available;
+                // Fijados de este día (solo el día 1; los siguientes se completan solos).
+                const fixed = (k === 0 ? fixedIds : []).map(poiById).filter(Boolean)
+                    .map(p => ({ id: p.id, name: p.name, category: p.category, zona: zonaByPoi[p.id], lat: p.lat, lng: p.lng }));
+                const fixedSet = new Set(fixed.map(f => f.id));
+
+                // Candidatos = activos no fijados, no asignados a otros días, no usados en esta tanda.
+                const candidatesPois = mode === 'ordenar' ? [] : activePois.filter(p =>
+                    !fixedSet.has(p.id) && !assignedByPoi[p.id] && !usedGlobal.has(p.id));
+                const candidates = candidatesPois.map(p => ({ id: p.id, name: p.name, category: p.category, zona: zonaByPoi[p.id], rating: p.rating, lat: p.lat, lng: p.lng }));
+
+                if (fixed.length === 0 && candidates.length === 0) break;
+
+                // Eventos que coinciden con la fecha de ESTE día.
+                const dayEvents = date ? (trip.eventos || []).filter(e => {
+                    const ini = e.fechaInicio || e.fechaFin, fin = e.fechaFin || e.fechaInicio;
+                    return ini && date >= ini && date <= fin;
+                }).map(e => ({ nombre: e.nombre, fechas: (e.fechaInicio || '') + (e.fechaFin && e.fechaFin !== e.fechaInicio ? ` a ${e.fechaFin}` : ''), notas: e.notas })) : [];
+
+                const candById = {};
+                [...fixed, ...candidates].forEach(c => { candById[c.id] = c; });
+
                 const ai = await generateAiItinerary({
                     destination: trip.destination || '',
-                    dayNumber, dayDate,
-                    tripStart: trip.startDate || null,
-                    tripEnd: trip.endDate || null,
-                    totalDays: nDays,
-                    instructions,
-                    startTime,
+                    dayNumber, dayDate: date,
+                    tripStart: trip.startDate || null, tripEnd: trip.endDate || null, totalDays: nDays,
+                    startTime, mode,
                     start: { name: startLoc.name, lat: startLoc.lat, lng: startLoc.lng },
                     end: { name: endLoc.name, lat: endLoc.lat, lng: endLoc.lng },
-                    candidates: candidates.map(c => ({
-                        id: c.id, name: c.name, category: c.category,
-                        rating: c.rating, reviews: c.userRatingsTotal, lat: c.lat, lng: c.lng,
-                    })),
+                    fixed, candidates,
+                    assignedElsewhere: Object.keys(assignedByPoi).map(id => poiById(id)?.name).filter(Boolean),
+                    events: dayEvents,
+                    instructions,
                 });
-
                 if (Array.isArray(ai.events)) allEvents.push(...ai.events);
                 lastSuggestions = ai.suggestions || [];
 
-                const built = await buildAiItinerary(ai, startLoc, endLoc, candidates);
-                if (built.optimizedPois.length === 0) {
-                    if (k === 0) toast('La IA no encontró una combinación válida. Prueba a añadir más lugares.', 'info');
-                    break;
-                }
-
+                const built = await buildFromParadas(ai, startLoc, endLoc, candById);
                 newDays.push({
-                    id: `${Date.now()}-${k}`,
-                    title: ai.dayTitle || `Día ${dayNumber}`,
-                    summary: ai.summary || '',
+                    id: k === 0 && editingDay ? editingDay : `${Date.now()}-${k}`,
+                    title: title || `Día ${dayNumber}`,
+                    fecha: date, summary: ai.resumen_logica || '', avisos: Array.isArray(ai.avisos) ? ai.avisos : [],
                     startTime, startId, endId, startLoc, endLoc,
-                    optimizedPois: built.optimizedPois,
-                    legs: built.legs,
-                    timeline: built.timeline,
-                    totalDurationSec: built.totalDurationSec,
+                    optimizedPois: built.optimizedPois, legs: built.legs, timeline: built.timeline, totalDurationSec: built.totalDurationSec,
                 });
-
-                // Los lugares usados en este día no se reutilizan en los siguientes.
-                const usedIds = new Set(built.timeline.filter(s => s.type === 'poi' && s.poiId).map(s => s.poiId));
-                available = available.filter(p => !usedIds.has(p.id));
+                built.timeline.forEach(s => { if (s.type === 'poi' && s.poiId) usedGlobal.add(s.poiId); });
             }
 
-            if (newDays.length > 0) {
-                // Un solo día en edición -> respeta el id que se estaba editando; varios -> ids nuevos.
-                if (nDays === 1 && editingDay) newDays[0].id = editingDay;
-                const existingIndex = itineraries.findIndex(i => i.id === editingDay);
-                let updatedList = [...itineraries];
-                if (existingIndex >= 0) { updatedList[existingIndex] = newDays[0]; updatedList = [...updatedList, ...newDays.slice(1)]; }
-                else updatedList = [...updatedList, ...newDays];
-                store.updateTrip(trip.id, { itineraries: updatedList });
-                setEditingDay(null);
+            if (newDays.length === 0) { toast('La IA no encontró una combinación válida.', 'info'); return; }
 
-                // Eventos (dedupe por nombre) y sugerencias de lugares nuevos.
-                const seen = new Set();
-                setAiEvents(allEvents.filter(e => e?.name && !seen.has(e.name) && seen.add(e.name)));
-                const resolved = await resolveSuggestions(lastSuggestions, { destination: trip.destination, locationBias });
-                const existingPlaceIds = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
-                setAiSuggestions(resolved.filter(r => !r.placeId || !existingPlaceIds.has(r.placeId)));
-                if (nDays > 1) toast(`Se han generado ${newDays.length} día(s).`, 'success');
-            }
+            const existingIndex = itineraries.findIndex(i => i.id === editingDay);
+            let updatedList = [...itineraries];
+            if (existingIndex >= 0) { updatedList[existingIndex] = newDays[0]; updatedList = [...updatedList, ...newDays.slice(1)]; }
+            else updatedList = [...updatedList, ...newDays];
+            store.updateTrip(trip.id, { itineraries: updatedList });
+            setEditingDay(null);
+
+            const seen = new Set();
+            setAiEvents(allEvents.filter(e => e?.name && !seen.has(e.name) && seen.add(e.name)));
+            const resolved = await resolveSuggestions(lastSuggestions, { destination: trip.destination, locationBias });
+            const existingPlaceIds = new Set(trip.pois.map(p => p.placeId).filter(Boolean));
+            setAiSuggestions(resolved.filter(r => !r.placeId || !existingPlaceIds.has(r.placeId)));
+            if (newDays.length > 1) toast(`Se han generado ${newDays.length} días.`, 'success');
         } catch (err) {
             toast(`No se pudo generar con IA: ${err.message}`, 'error', 7000);
         } finally {
@@ -754,296 +446,368 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
             rating: place.rating || null, userRatingsTotal: place.userRatingsTotal || null,
             photoUrl: place.photoUrl || null, photos: place.photos || [],
             openingHours: place.openingHours || null, website: place.website || null,
-            phoneNumber: place.phoneNumber || null, priceLevel: place.priceLevel ?? null,
-            types: place.types || [],
+            phoneNumber: place.phoneNumber || null, priceLevel: place.priceLevel ?? null, types: place.types || [],
         });
         toast(`"${place.name}" añadido al viaje.`, 'success');
         setAiSuggestions(prev => prev.filter(s => s.placeId !== place.placeId));
     };
 
-    // ===== RENDER: EDIT FORM =====
+    // ----- Editor DnD de un itinerario existente -----
+    const recalcTimesFrom = (timeline, anchorIdx) => {
+        const updated = [...timeline];
+        let currentTime = updated[anchorIdx].time || startTime;
+        for (let i = anchorIdx; i < updated.length; i++) {
+            const step = updated[i];
+            updated[i] = { ...step, time: currentTime };
+            const visitMins = (step.visitHours || 0) * 60;
+            if (step.type === 'poi') {
+                currentTime = addMinutes(currentTime, visitMins || 90);
+                const nextLeg = updated[i + 1]?.leg;
+                if (nextLeg) currentTime = addMinutes(currentTime, nextLeg.durationMins);
+            } else if (step.type === 'meal') {
+                currentTime = addMinutes(currentTime, step.mealTime === 'Cena' ? 90 : 75);
+            } else if (step.type === 'departure') {
+                currentTime = addMinutes(currentTime, step.leg?.durationMins || 0);
+            }
+        }
+        return updated;
+    };
+    const pinEnds = (list) => {
+        const dep = list.filter(s => s.type === 'departure');
+        const arr = list.filter(s => s.type === 'arrival');
+        const mid = list.filter(s => s.type !== 'departure' && s.type !== 'arrival');
+        return [...dep, ...mid, ...arr];
+    };
+    const handleDragEnd = (event) => {
+        const { active, over } = event;
+        if (!over || active.id === over.id) return;
+        setEditTimeline(prev => {
+            const oldIdx = prev.findIndex(s => s.dndId === active.id);
+            const newIdx = prev.findIndex(s => s.dndId === over.id);
+            if (oldIdx < 0 || newIdx < 0) return prev;
+            return recalcTimesFrom(pinEnds(arrayMove(prev, oldIdx, newIdx)), 0);
+        });
+    };
+    const updateStepTime = (idx, newTime) => {
+        setEditTimeline(prev => recalcTimesFrom(prev.map((s, i) => i === idx ? { ...s, time: newTime } : s), idx));
+    };
+    const deleteStep = (idx) => setEditTimeline(prev => prev.filter((_, i) => i !== idx));
+    const handleEditExisting = (itinerary) => {
+        setEditingItinerary(itinerary.id);
+        setEditTimeline((itinerary.timeline || []).map((s, i) => ({ ...JSON.parse(JSON.stringify(s)), dndId: `step-${i}-${Math.random().toString(36).slice(2, 8)}` })));
+    };
+    const saveEditedItinerary = (itineraryId) => {
+        const idx = itineraries.findIndex(i => i.id === itineraryId);
+        if (idx < 0) return;
+        const updated = [...itineraries];
+        const cleanTimeline = editTimeline.map(({ dndId, ...rest }) => rest); // eslint-disable-line no-unused-vars
+        updated[idx] = { ...updated[idx], timeline: cleanTimeline };
+        store.updateTrip(trip.id, { itineraries: updated });
+        setEditingItinerary(null); setEditTimeline(null);
+    };
+    const deleteItinerary = (id) => {
+        if (!confirm('¿Eliminar este itinerario?')) return;
+        store.updateTrip(trip.id, { itineraries: itineraries.filter(i => i.id !== id) });
+    };
+
+    // ----- Días-semilla importados (sin timeline aún) -----
+    const RECOMMENDED_DAY_MIN = 10 * 60;
+    const estimateSeedDay = (day) => {
+        const stops = (day.paradas || []).map(poiById).filter(Boolean);
+        const base = trip.accommodations.find(a => a.id === day.baseId) || trip.accommodations.find(a => a.id === trip.selectedAccommodation) || trip.accommodations.find(a => a.isActive !== false);
+        const visitMin = stops.reduce((sum, p) => sum + (p.duracionEstimadaMin || (VISIT_DURATION[p.category] || 1.5) * 60), 0);
+        const seq = [base, ...stops, base].filter(Boolean);
+        let driveMin = 0;
+        for (let i = 0; i < seq.length - 1; i++) { const m = haversineMeters(seq[i], seq[i + 1]); if (m !== Infinity) driveMin += (m / 1000) / 45 * 60; }
+        const totalMin = visitMin + driveMin;
+        return { stops, totalMin, overBudget: totalMin > RECOMMENDED_DAY_MIN };
+    };
+    const eventsForSeedDay = (day) => {
+        if (!day.fecha) return [];
+        return (trip.eventos || []).filter(e => { const ini = e.fechaInicio || e.fechaFin, fin = e.fechaFin || e.fechaInicio; return ini && day.fecha >= ini && day.fecha <= fin; });
+    };
+
+    // ===================== RENDER: PLANIFICAR RUTA =====================
     if (editingDay) {
+        const editingDayNumber = itineraries.findIndex(i => i.id === editingDay) + 1;
+        const filteredList = activePois.filter(p => zoneFilter === 'all' || zonaByPoi[p.id] === zoneFilter);
+        const q = search.trim().toLowerCase();
+        const searchFiltered = q ? filteredList.filter(p => p.name.toLowerCase().includes(q) || (p.municipio || '').toLowerCase().includes(q)) : filteredList;
+        const fixedPois = fixedIds.map(poiById).filter(Boolean);
+        const listPois = searchFiltered.filter(p => !fixedIds.includes(p.id));
+        const mapCenter = { lat: trip.destinationLat || activePois[0]?.lat || 36.5, lng: trip.destinationLng || activePois[0]?.lng || -6.1 };
+        const popupPoi = mapPopupId ? poiById(mapPopupId) : null;
+
+        const pinColor = (p) => fixedIds.includes(p.id) ? PIN_FIXED : (assignedByPoi[p.id] ? PIN_OTHER : PIN_UNSET);
+        const dimmed = (p) => zoneFilter !== 'all' && zonaByPoi[p.id] !== zoneFilter;
+
+        const cta = mode === 'ordenar'
+            ? (fixedIds.length < 2 ? 'Fija 2+ lugares' : `✨ Ordenar ${fixedIds.length} lugares`)
+            : (aiDays > 1 ? `✨ Generar ${aiDays} días` : (fixedIds.length ? `✨ Generar día · ${fixedIds.length} fijados` : '✨ Generar día con IA'));
+
         return (
-            <div className="animate-fade-in-up">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-md)' }}>
-                    <h2 className="text-subtitle">Planificar Ruta</h2>
+            <div className="animate-fade-in-up" style={{ paddingBottom: 96 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-sm)' }}>
+                    <div>
+                        <h2 className="text-subtitle">Planificar Ruta</h2>
+                        <p className="text-caption text-secondary" style={{ marginTop: 2 }}>
+                            {trip.destination ? `Viaje a ${trip.destination.split(',')[0]} · ` : ''}Toca un lugar para fijarlo 📌 al día. La IA hará el resto.
+                        </p>
+                    </div>
                     <button className="text-caption text-secondary" onClick={() => setEditingDay(null)}>Cancelar</button>
                 </div>
 
-                {/* Name + Start time */}
+                {/* Config del día */}
                 <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
                     <div style={{ display: 'flex', gap: 'var(--space-md)' }}>
                         <div style={{ flex: 2 }}>
-                            <label className="field-label" style={{ marginBottom: '4px' }}>Nombre del día</label>
-                            <input className="input-field" style={{ padding: '12px 16px' }} value={title} onChange={e => setTitle(e.target.value)} />
+                            <label className="field-label">Día</label>
+                            <input className="input-field" style={{ padding: '10px 12px' }} value={title} onChange={e => setTitle(e.target.value)} />
+                        </div>
+                        <div style={{ flex: 1.4 }}>
+                            <label className="field-label">Fecha</label>
+                            <input className="input-field" type="date" style={{ padding: '10px 12px' }} value={dayDate} onChange={e => setDayDate(e.target.value)} />
                         </div>
                         <div style={{ flex: 1 }}>
-                            <label className="field-label" style={{ marginBottom: '4px' }}>Hora inicio</label>
-                            <input className="input-field" type="time" style={{ padding: '12px 16px' }} value={startTime} onChange={e => setStartTime(e.target.value)} />
+                            <label className="field-label">Hora inicio</label>
+                            <input className="input-field" type="time" style={{ padding: '10px 12px' }} value={startTime} onChange={e => setStartTime(e.target.value)} />
                         </div>
                     </div>
-
                     <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
                         <div style={{ flex: 1 }}>
-                            <label className="field-label" style={{ marginBottom: '4px' }}>Punto de Partida</label>
-                            <select className="input-field" style={{ padding: '12px 16px' }} value={startId} onChange={e => setStartId(e.target.value)}>
+                            <label className="field-label">Salida</label>
+                            <select className="input-field" style={{ padding: '10px 12px' }} value={startId} onChange={e => setStartId(e.target.value)}>
                                 <option value="">Seleccionar...</option>
                                 {allLocations.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
                             </select>
                         </div>
                         <div style={{ flex: 1 }}>
-                            <label className="field-label" style={{ marginBottom: '4px' }}>Punto Final</label>
-                            <select className="input-field" style={{ padding: '12px 16px' }} value={endId} onChange={e => setEndId(e.target.value)}>
+                            <label className="field-label">Regreso</label>
+                            <select className="input-field" style={{ padding: '10px 12px' }} value={endId} onChange={e => setEndId(e.target.value)}>
                                 <option value="">Seleccionar...</option>
                                 {allLocations.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
                             </select>
                         </div>
                     </div>
+
+                    {/* Aviso de eventos que coinciden con la fecha */}
+                    {eventsForDate.length > 0 && (
+                        <div style={{ marginTop: 'var(--space-md)' }}>
+                            <button onClick={() => setEventsOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: 'var(--color-gold-light)', border: '1px solid var(--color-gold)', borderRadius: 'var(--radius-sm)', padding: '8px 12px', cursor: 'pointer', textAlign: 'left' }}>
+                                <PartyPopper size={15} style={{ color: 'var(--color-gold)', flexShrink: 0 }} />
+                                <span className="text-caption" style={{ fontWeight: 700, flex: 1 }}>{eventsForDate.length} evento(s) coinciden con el {fmtDate(dayDate)}</span>
+                                <span className="text-caption text-secondary">{eventsOpen ? '▲' : '▼'}</span>
+                            </button>
+                            {eventsOpen && (
+                                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    {eventsForDate.map(ev => {
+                                        const on = fixedEvents.includes(ev.nombre);
+                                        return (
+                                            <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'center', paddingLeft: 4 }}>
+                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div className="text-caption" style={{ fontWeight: 700 }}>{ev.nombre}</div>
+                                                    {ev.notas && <div className="text-caption text-secondary truncate">{ev.notas}</div>}
+                                                </div>
+                                                <button className={`chip ${on ? 'active' : ''}`} style={{ fontSize: 11, padding: '4px 10px' }}
+                                                    onClick={() => setFixedEvents(prev => on ? prev.filter(n => n !== ev.nombre) : [...prev, ev.nombre])}>
+                                                    {on ? '📌 Fijado' : 'Fijar'}
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    {!dayDate && (
+                        <p className="text-caption text-tertiary" style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <Calendar size={12} /> Selecciona la fecha para incluir eventos de esos días.
+                        </p>
+                    )}
                 </div>
 
-                {/* Generación con IA */}
-                <div className="card" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-primary)', background: 'var(--color-primary-light)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                        <Sparkles size={18} style={{ color: 'var(--color-primary)' }} />
-                        <span style={{ fontWeight: 800, fontSize: '14px', color: 'var(--color-primary)' }}>Generar con IA</span>
-                    </div>
-                    <p className="text-caption text-secondary" style={{ marginBottom: '10px' }}>
-                        Elige el inicio, el fin y tus preferencias. La IA seleccionará los mejores lugares de tu lista,
-                        los ordenará por cercanía y te sugerirá sitios imprescindibles. Podrás editarlo después.
-                    </p>
+                {/* Modo */}
+                <div className="segmented" style={{ display: 'flex', gap: 4, background: 'var(--bg-tertiary)', padding: 4, borderRadius: 'var(--radius-full)', marginBottom: 8 }}>
+                    <button onClick={() => setMode('completar')} style={{ flex: 1, padding: '10px', borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer', fontWeight: 800, fontSize: 13, background: mode === 'completar' ? 'var(--bg-primary)' : 'transparent', color: mode === 'completar' ? 'var(--color-primary)' : 'var(--text-secondary)', boxShadow: mode === 'completar' ? 'var(--shadow-sm)' : 'none' }}>✨ IA completa el día</button>
+                    <button onClick={() => setMode('ordenar')} style={{ flex: 1, padding: '10px', borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer', fontWeight: 800, fontSize: 13, background: mode === 'ordenar' ? 'var(--bg-primary)' : 'transparent', color: mode === 'ordenar' ? 'var(--color-primary)' : 'var(--text-secondary)', boxShadow: mode === 'ordenar' ? 'var(--shadow-sm)' : 'none' }}>📌 Solo mis lugares</button>
+                </div>
+                <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
+                    {mode === 'completar'
+                        ? 'La IA respetará tus lugares fijados, completará el día con sitios cercanos y añadirá paradas de comida.'
+                        : 'La IA solo ordenará y dará horarios a tus lugares fijados (mínimo 2) y añadirá comidas. No sugiere sitios nuevos.'}
+                </p>
 
-                    {/* Preferencias rápidas: cada chip añade una indicación para la IA. */}
-                    <div className="chip-row" style={{ marginBottom: '10px', flexWrap: 'nowrap' }}>
-                        {PREF_CHIPS.map(c => (
-                            <button
-                                key={c.key}
-                                type="button"
-                                className={`chip ${aiPrefs[c.key] ? 'active' : ''}`}
-                                style={{ fontSize: '12px', padding: '6px 12px' }}
-                                onClick={() => setAiPrefs(prev => ({ ...prev, [c.key]: !prev[c.key] }))}
-                            >
-                                {c.label}
+                {/* Buscador con sugerencias */}
+                <div className="input-group" style={{ marginBottom: searchSug.length ? 8 : 'var(--space-md)' }}>
+                    <div className="input-icon"><Search size={18} /></div>
+                    <input className="input-field" value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && runSearch()}
+                        placeholder="Buscar lugar o pedir a la IA... ej. 'pueblo blanco'" />
+                    {search && <button onClick={runSearch} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'var(--color-primary)', color: '#fff', border: 'none', borderRadius: 'var(--radius-full)', padding: '4px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{searchLoading ? '...' : 'IA'}</button>}
+                </div>
+                {searchSug.length > 0 && (
+                    <div className="card" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-primary)' }}>
+                        <p className="text-caption" style={{ fontWeight: 800, color: 'var(--color-primary)', marginBottom: 8 }}>✨ Sugerencias de la IA (no están en tu lista)</p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {searchSug.map(s => (
+                                <div key={s.placeId} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                    <img src={s.photoUrl || getPlaceholderImage(s.name)} alt="" style={{ width: 40, height: 40, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div className="text-caption truncate" style={{ fontWeight: 700 }}>{s.name}</div>
+                                        <div className="text-caption text-secondary truncate">{s.address}</div>
+                                    </div>
+                                    <button className="btn btn-outline" style={{ padding: '6px 12px', fontSize: 12, width: 'auto', flexShrink: 0 }} onClick={() => addSearchSuggestion(s)}><Plus size={14} /> Fijar</button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Mini-mapa real con pines de estado */}
+                {apiIsLoaded && activePois.length > 0 && (
+                    <div style={{ position: 'relative', height: 200, borderRadius: 'var(--radius-lg)', overflow: 'hidden', marginBottom: 'var(--space-md)' }}>
+                        <GMap defaultCenter={mapCenter} defaultZoom={9} mapId="travel-map" gestureHandling="greedy" disableDefaultUI style={{ width: '100%', height: '100%' }}>
+                            {activePois.filter(p => p.lat != null).map(p => (
+                                <AdvancedMarker key={p.id} position={{ lat: p.lat, lng: p.lng }} onClick={() => setMapPopupId(p.id)}>
+                                    <div style={{ width: 20, height: 20, borderRadius: '50% 50% 50% 0', transform: 'rotate(-45deg)', background: pinColor(p), border: '2px solid #fff', boxShadow: '0 1px 4px rgba(0,0,0,.3)', opacity: dimmed(p) ? 0.35 : 1 }} />
+                                </AdvancedMarker>
+                            ))}
+                            {popupPoi && (
+                                <InfoWindow position={{ lat: popupPoi.lat, lng: popupPoi.lng }} onCloseClick={() => setMapPopupId(null)}>
+                                    <div style={{ width: 190, padding: 2 }}>
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                            <img src={popupPoi.photoUrl || getPlaceholderImage(popupPoi.name)} alt="" style={{ width: 44, height: 44, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontWeight: 800, fontSize: 13, lineHeight: 1.2 }}>{popupPoi.name}</div>
+                                                <div style={{ fontSize: 10, color: '#64748b' }}>{CATEGORY_MAP[popupPoi.category]?.label || 'Lugar'}{popupPoi.duracionEstimadaMin ? ` · ${formatDuration(popupPoi.duracionEstimadaMin * 60)}` : ''}</div>
+                                            </div>
+                                        </div>
+                                        {assignedByPoi[popupPoi.id] && assignedByPoi[popupPoi.id] !== editingDayNumber && (
+                                            <div style={{ fontSize: 10, color: PIN_OTHER, fontWeight: 800, marginTop: 4 }}>Día {assignedByPoi[popupPoi.id]} ✓</div>
+                                        )}
+                                        <button className="btn btn-primary" style={{ width: '100%', marginTop: 6, padding: '6px', fontSize: 12, borderRadius: 6 }}
+                                            onClick={() => { toggleFixed(popupPoi.id); setMapPopupId(null); }}>
+                                            {fixedIds.includes(popupPoi.id) ? 'Quitar del día' : '📌 Fijar al día'}
+                                        </button>
+                                    </div>
+                                </InfoWindow>
+                            )}
+                        </GMap>
+                        <div style={{ position: 'absolute', bottom: 8, left: 8, display: 'flex', gap: 8, background: 'rgba(255,255,255,.92)', borderRadius: 'var(--radius-full)', padding: '4px 10px', fontSize: 10, fontWeight: 700 }}>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: PIN_UNSET }} /> Sin elegir</span>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: PIN_FIXED }} /> Fijado</span>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: PIN_OTHER }} /> Otro día</span>
+                        </div>
+                    </div>
+                )}
+
+                {/* Chips de zona */}
+                {zones.length > 1 && (
+                    <div className="chip-row" style={{ marginBottom: 'var(--space-md)' }}>
+                        <button className={`chip ${zoneFilter === 'all' ? 'active' : ''}`} onClick={() => setZoneFilter('all')}>Todo {activePois.length}</button>
+                        {zones.map(z => (
+                            <button key={z.name} className={`chip ${zoneFilter === z.name ? 'active' : ''}`} onClick={() => setZoneFilter(z.name)}>
+                                {z.name.split(' y ')[0].split(',')[0]} {z.count}
                             </button>
                         ))}
                     </div>
+                )}
 
-                    <textarea
-                        className="input-field"
-                        rows={2}
-                        style={{ padding: '10px 12px', resize: 'vertical', marginBottom: '10px', fontSize: '13px' }}
-                        placeholder="Otras indicaciones (opcional): quiero ver estos 8 lugares, sin madrugar, terraza para cenar..."
-                        value={aiInstructions}
-                        onChange={e => setAiInstructions(e.target.value)}
-                    />
-
-                    {/* Nº de días a planificar de una vez ("estos lugares en N días"). */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
-                        <label className="text-caption text-secondary" style={{ fontWeight: 700 }}>Días a planificar:</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <button type="button" className="btn btn-outline" style={{ width: 34, height: 34, padding: 0, borderRadius: 8 }} onClick={() => setAiDays(d => Math.max(1, (parseInt(d, 10) || 1) - 1))}>−</button>
-                            <input
-                                type="number" min="1" max="14"
-                                value={aiDays}
-                                onChange={e => setAiDays(e.target.value)}
-                                style={{ width: 52, textAlign: 'center', padding: '6px', borderRadius: 8, border: '1px solid var(--border-color)', fontSize: 14, fontWeight: 700, background: 'var(--bg-primary)' }}
-                            />
-                            <button type="button" className="btn btn-outline" style={{ width: 34, height: 34, padding: 0, borderRadius: 8 }} onClick={() => setAiDays(d => Math.min(14, (parseInt(d, 10) || 1) + 1))}>+</button>
+                {/* Fijados */}
+                {fixedPois.length > 0 && (
+                    <div style={{ marginBottom: 'var(--space-md)' }}>
+                        <p className="text-caption" style={{ fontWeight: 800, color: 'var(--color-primary)', marginBottom: 6 }}>📌 Fijados para este día ({fixedPois.length})</p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {fixedPois.map(p => <PoiRow key={p.id} poi={p} state="fixed" onToggle={() => toggleFixed(p.id)} onOpen={() => setPoiDetail(p)} />)}
                         </div>
                     </div>
+                )}
 
-                    <button
-                        className="btn btn-primary btn-full"
-                        onClick={handleGenerateAI}
-                        disabled={aiLoading || generating || !startId || !endId}
-                    >
-                        {aiLoading ? '🧠 Pensando tu plan...' : (parseInt(aiDays, 10) > 1 ? `✨ Generar ${aiDays} días con IA` : '✨ Generar día con IA')}
+                {/* Lista */}
+                <p className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Lugares de tu lista</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {listPois.map(p => (
+                        <PoiRow key={p.id} poi={p}
+                            state={assignedByPoi[p.id] && assignedByPoi[p.id] !== editingDayNumber ? 'other' : 'unset'}
+                            dayNum={assignedByPoi[p.id]}
+                            onToggle={() => toggleFixed(p.id)} onOpen={() => setPoiDetail(p)} />
+                    ))}
+                    {listPois.length === 0 && <p className="text-caption text-tertiary" style={{ padding: '8px 0' }}>No hay más lugares en esta zona/búsqueda.</p>}
+                </div>
+
+                {/* Otras indicaciones */}
+                <div style={{ marginTop: 'var(--space-lg)' }}>
+                    <p className="text-caption" style={{ fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Otras indicaciones</p>
+                    <textarea className="input-field" rows={2} style={{ padding: '10px 12px', resize: 'vertical', fontSize: 13 }}
+                        placeholder="Opcional: sin madrugar, terraza para cenar, evitar mucho coche..." value={aiInstructions} onChange={e => setAiInstructions(e.target.value)} />
+                </div>
+
+                {/* CTA fija inferior */}
+                <div style={{ position: 'fixed', left: 0, right: 0, bottom: 'var(--nav-height)', maxWidth: 480, margin: '0 auto', padding: '10px 16px', background: 'var(--bg-primary)', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 10, alignItems: 'center', zIndex: 50 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                        <button type="button" className="btn btn-outline" style={{ width: 36, height: 40, padding: 0, borderRadius: 10 }} onClick={() => setAiDays(d => Math.max(1, (parseInt(d, 10) || 1) - 1))}>−</button>
+                        <span style={{ width: 24, textAlign: 'center', fontWeight: 800 }}>{aiDays}</span>
+                        <button type="button" className="btn btn-outline" style={{ width: 36, height: 40, padding: 0, borderRadius: 10 }} onClick={() => setAiDays(d => Math.min(14, (parseInt(d, 10) || 1) + 1))}>+</button>
+                    </div>
+                    <button className="btn btn-primary" style={{ flex: 1, height: 48 }} onClick={handleGenerate} disabled={aiLoading || !canGenerate()}>
+                        {aiLoading ? '🧠 Pensando...' : cta}
                     </button>
                 </div>
 
-                {/* POI selection with visit hours */}
-                {(() => {
-                    const activePois = trip.pois.filter(p => p.isActive !== false);
-                    const visiblePois = activePois.filter(p => catFilter === 'all' || p.category === catFilter);
-                    // Categorías presentes entre los lugares activos (para el filtro rápido).
-                    const presentCats = [...new Set(activePois.map(p => p.category))]
-                        .map(id => CATEGORY_MAP[id]).filter(Boolean);
-                    const allVisibleSelected = visiblePois.length > 0 && visiblePois.every(p => selectedPois.includes(p.id));
-                    return (
-                        <>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '4px' }}>
-                                <h3 className="text-body" style={{ fontWeight: 700 }}>O elígelos tú</h3>
-                                <button
-                                    className="text-caption"
-                                    style={{ color: 'var(--color-primary)', fontWeight: 700 }}
-                                    onClick={() => {
-                                        // Marca/desmarca todos los VISIBLES (respeta el filtro de categoría).
-                                        const visibleIds = visiblePois.map(p => p.id);
-                                        setSelectedPois(prev => allVisibleSelected
-                                            ? prev.filter(id => !visibleIds.includes(id))
-                                            : [...new Set([...prev, ...visibleIds])]);
-                                    }}
-                                >
-                                    {allVisibleSelected ? 'Desmarcar todos' : 'Marcar todos'}
-                                </button>
-                            </div>
-                            <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-sm)' }}>
-                                Selecciona los lugares e indica cuánto tiempo estimas. El itinerario incluirá almuerzo y cena automáticamente.
-                            </p>
-
-                            {/* Filtro por categoría para seleccionar por bloques. */}
-                            {presentCats.length > 1 && (
-                                <div className="chip-row" style={{ marginBottom: 'var(--space-md)' }}>
-                                    <button className={`chip ${catFilter === 'all' ? 'active' : ''}`} onClick={() => setCatFilter('all')}>📍 Todo</button>
-                                    {presentCats.map(c => (
-                                        <button key={c.id} className={`chip ${catFilter === c.id ? 'active' : ''}`} onClick={() => setCatFilter(c.id)}>
-                                            {c.emoji} {c.label}
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: 'var(--space-xl)' }}>
-                                {visiblePois.map(poi => {
-                        const isSelected = selectedPois.includes(poi.id);
-                        const defaultHrs = VISIT_DURATION[poi.category] || 1.5;
-                        return (
-                            <div key={poi.id}
-                                className="card"
-                                style={{ padding: '12px', border: `1px solid ${isSelected ? 'var(--color-primary)' : 'transparent'}` }}
-                            >
-                                <button
-                                    type="button"
-                                    style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', background: 'transparent', border: 'none', WebkitTapHighlightColor: 'transparent', padding: '8px 0', width: '100%', textAlign: 'left' }}
-                                    onClick={() => togglePoiSelection(poi.id)}
-                                >
-                                    <div style={{
-                                        width: '20px', height: '20px', borderRadius: '4px', flexShrink: 0,
-                                        border: isSelected ? 'none' : '1px solid var(--text-tertiary)',
-                                        background: isSelected ? 'var(--color-primary)' : 'transparent',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center'
-                                    }}>
-                                        {isSelected && <CheckCircle2 size={14} color="white" />}
-                                    </div>
-                                    <span style={{ flex: 1, fontWeight: isSelected ? 700 : 500, fontSize: '14px' }}>
-                                        {categoryEmoji(poi.category)} {poi.name}
-                                    </span>
-                                </button>
-                                {isSelected && (
-                                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginTop: '8px', paddingLeft: '30px' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <Clock size={14} style={{ color: 'var(--text-tertiary)' }} />
-                                            <span className="text-caption text-secondary">Estima:</span>
-                                            <input
-                                                type="number"
-                                                min="0.5"
-                                                max="12"
-                                                step="0.5"
-                                                value={visitHours[poi.id] ?? defaultHrs}
-                                                onClick={e => e.stopPropagation()}
-                                                onChange={e => setVisitHours(prev => ({ ...prev, [poi.id]: parseFloat(e.target.value) }))}
-                                                style={{ width: '56px', padding: '4px 8px', borderRadius: '8px', border: '1px solid var(--border-color)', fontSize: '13px', background: 'var(--bg-tertiary)' }}
-                                            />
-                                            <span className="text-caption text-secondary">h</span>
-                                        </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <Navigation size={14} style={{ color: 'var(--text-tertiary)' }} />
-                                            <select
-                                                value={travelModes[poi.id] || 'DRIVING'}
-                                                onChange={e => setTravelModes(prev => ({ ...prev, [poi.id]: e.target.value }))}
-                                                onClick={e => e.stopPropagation()}
-                                                style={{ padding: '4px 8px', borderRadius: '8px', border: '1px solid var(--border-color)', fontSize: '13px', background: 'var(--bg-tertiary)', cursor: 'pointer' }}
-                                            >
-                                                <option value="DRIVING">🚗 Coche</option>
-                                                <option value="WALKING">🚶 A pie</option>
-                                                <option value="TRANSIT">🚌 TP</option>
-                                                <option value="BICYCLING">🚲 Bici</option>
-                                            </select>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                            </div>
-                        </>
-                    );
-                })()}
-
-                <button
-                    className="btn btn-accent btn-full"
-                    onClick={() => generateRoute()}
-                    disabled={generating || aiLoading || !startId || !endId || selectedPois.length === 0}
-                >
-                    {generating ? '⏳ Calculando itinerario...' : '🗺️ Generar con mi selección'}
-                </button>
+                {poiDetail && (
+                    <PoiDetailModal poi={trip.pois.find(p => p.id === poiDetail.id) || poiDetail} trip={trip}
+                        onClose={() => setPoiDetail(null)} onDelete={() => setPoiDetail(null)}
+                        onUpdate={(u) => store.updatePoi(trip.id, poiDetail.id, u)}
+                        onSaveDistances={(r) => store.saveDistances(trip.id, r)} />
+                )}
             </div>
         );
     }
 
-    // ===== RENDER: INLINE EDIT MODE =====
+    // ===================== RENDER: EDITOR DnD =====================
     if (editingItinerary && editTimeline) {
         const itinerary = itineraries.find(i => i.id === editingItinerary);
         return (
             <div className="animate-fade-in-up">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-md)' }}>
                     <h2 className="text-subtitle">✏️ Editar: {itinerary?.title}</h2>
-                    <button className="text-caption text-secondary" onClick={() => { setEditingItinerary(null); setEditTimeline(null); }}>
-                        Cancelar
-                    </button>
+                    <button className="text-caption text-secondary" onClick={() => { setEditingItinerary(null); setEditTimeline(null); }}>Cancelar</button>
                 </div>
                 <p className="text-caption text-secondary" style={{ marginBottom: 'var(--space-md)' }}>
-                    Arrastra <GripVertical size={12} style={{ display: 'inline', verticalAlign: 'middle' }} /> para reordenar las paradas o pulsa la ✕ para quitarlas. Los horarios se recalculan solos.
+                    Arrastra <GripVertical size={12} style={{ display: 'inline', verticalAlign: 'middle' }} /> para reordenar o pulsa ✕ para quitar. Los horarios se recalculan solos.
                 </p>
-
                 <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                     <SortableContext items={editTimeline.map(s => s.dndId)} strategy={verticalListSortingStrategy}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 'var(--space-lg)' }}>
                             {editTimeline.map((step, idx) => (
-                                <SortableStep
-                                    key={step.dndId}
-                                    step={step}
-                                    idx={idx}
-                                    total={editTimeline.length}
-                                    onDelete={deleteStep}
-                                    onTimeChange={updateStepTime}
-                                />
+                                <SortableStep key={step.dndId} step={step} idx={idx} total={editTimeline.length} onDelete={deleteStep} onTimeChange={updateStepTime} />
                             ))}
                         </div>
                     </SortableContext>
                 </DndContext>
-
-                <button className="btn btn-primary btn-full" onClick={() => saveEditedItinerary(editingItinerary)}>
-                    💾 Guardar Cambios
-                </button>
+                <button className="btn btn-primary btn-full" onClick={() => saveEditedItinerary(editingItinerary)}>💾 Guardar Cambios</button>
             </div>
         );
     }
 
-    // ===== RENDER: LIST =====
+    // ===================== RENDER: LISTA DE DÍAS =====================
     return (
         <div className="animate-fade-in-up">
             <div style={{ marginBottom: 'var(--space-md)' }}>
-                <h2 className="text-subtitle" style={{ marginBottom: '4px' }}>Itinerarios Diarios</h2>
-                <p className="text-body text-secondary">
-                    Genera rutas optimizadas con horarios y paradas de comida.
-                </p>
+                <h2 className="text-subtitle" style={{ marginBottom: 4 }}>Itinerarios Diarios</h2>
+                <p className="text-body text-secondary">Genera días con la IA: respeta tus lugares fijados, razona la logística y añade comidas.</p>
             </div>
 
-            {/* Eventos y fiestas locales detectados por la IA para las fechas del viaje */}
             {aiEvents.length > 0 && (
                 <div className="card animate-fade-in-up" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-gold)', background: 'var(--color-gold-light)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <PartyPopper size={18} style={{ color: 'var(--color-gold)' }} />
-                            <span style={{ fontWeight: 800, fontSize: '14px' }}>Fiestas y eventos en tus fechas</span>
-                        </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><PartyPopper size={18} style={{ color: 'var(--color-gold)' }} /><span style={{ fontWeight: 800, fontSize: 14 }}>Eventos en tus fechas</span></div>
                         <button onClick={() => setAiEvents([])} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={16} /></button>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '8px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
                         {aiEvents.map((ev, i) => (
-                            <div key={i} style={{ borderLeft: '3px solid var(--color-gold)', paddingLeft: '10px' }}>
-                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
-                                    <span style={{ fontWeight: 700, fontSize: '13px' }}>{ev.name}</span>
+                            <div key={i} style={{ borderLeft: '3px solid var(--color-gold)', paddingLeft: 10 }}>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 700, fontSize: 13 }}>{ev.name}</span>
                                     {ev.date && <span className="text-caption" style={{ color: 'var(--color-gold)', fontWeight: 700 }}>{ev.date}</span>}
                                 </div>
                                 <p className="text-caption text-secondary" style={{ lineHeight: 1.5 }}>{ev.description}</p>
@@ -1053,37 +817,20 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                 </div>
             )}
 
-            {/* Sugerencias de la IA (lugares nuevos resueltos con Google Places) */}
             {aiSuggestions.length > 0 && (
                 <div className="card animate-fade-in-up" style={{ marginBottom: 'var(--space-md)', border: '1px solid var(--color-primary)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <Sparkles size={18} style={{ color: 'var(--color-primary)' }} />
-                            <span style={{ fontWeight: 800, fontSize: '14px' }}>La IA también te recomienda</span>
-                        </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Sparkles size={18} style={{ color: 'var(--color-primary)' }} /><span style={{ fontWeight: 800, fontSize: 14 }}>La IA también te recomienda</span></div>
                         <button onClick={() => setAiSuggestions([])} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={16} /></button>
                     </div>
-                    <p className="text-caption text-secondary" style={{ marginBottom: '12px' }}>
-                        Lugares que no tenías. Añádelos al viaje para incluirlos en un día.
-                    </p>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
                         {aiSuggestions.map(s => (
-                            <div key={s.placeId} style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <div key={s.placeId} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                        <span style={{ fontWeight: 700, fontSize: '13px' }} className="truncate">{s.name}</span>
-                                        {s.essential && (
-                                            <span style={{ fontSize: '9px', fontWeight: 800, color: 'var(--color-primary)', background: 'var(--color-primary-light)', padding: '2px 6px', borderRadius: 'var(--radius-full)', flexShrink: 0 }}>IMPRESCINDIBLE</span>
-                                        )}
-                                        {s.rating && (
-                                            <span className="text-caption" style={{ color: '#f5a623', display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}><Star size={11} fill="#f5a623" /> {s.rating}</span>
-                                        )}
-                                    </div>
+                                    <div className="truncate" style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</div>
                                     <p className="text-caption text-secondary truncate">{s.aiReason}</p>
                                 </div>
-                                <button className="btn btn-outline" style={{ padding: '6px 12px', fontSize: '12px', width: 'auto', flexShrink: 0 }} onClick={() => addSuggestionToTrip(s)}>
-                                    <Plus size={14} /> Añadir
-                                </button>
+                                <button className="btn btn-outline" style={{ padding: '6px 12px', fontSize: 12, width: 'auto', flexShrink: 0 }} onClick={() => addSuggestionToTrip(s)}><Plus size={14} /> Añadir</button>
                             </div>
                         ))}
                     </div>
@@ -1092,69 +839,39 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
 
             <div>
                 {itineraries.map((itinerary) => {
-                    // Día-semilla (importado o creado desde el mapa): aún sin timeline calculada.
                     const isSeed = itinerary.seed && !(itinerary.timeline && itinerary.timeline.length);
                     if (isSeed) {
                         const est = estimateSeedDay(itinerary);
-                        const dayEvents = eventsForDay(itinerary);
+                        const dayEvents = eventsForSeedDay(itinerary);
                         return (
                             <div key={itinerary.id} className="card" style={{ marginBottom: 'var(--space-md)', borderLeft: '3px solid var(--color-primary)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                                     <div>
-                                        <h3 style={{ fontWeight: 700, fontSize: '17px' }}>{itinerary.title || `Día ${itinerary.dia || ''}`}</h3>
+                                        <h3 style={{ fontWeight: 700, fontSize: 17 }}>{itinerary.title || `Día ${itinerary.dia || ''}`}</h3>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                                            {itinerary.fecha && <span className="text-caption text-secondary">{itinerary.fecha}</span>}
-                                            <span className="text-caption" style={{ fontWeight: 700, color: est.overBudget ? 'var(--color-danger)' : 'var(--color-primary)' }}>
-                                                ~{formatDuration(est.totalMin * 60)} estimadas
-                                            </span>
+                                            {itinerary.fecha && <span className="text-caption text-secondary">{fmtDate(itinerary.fecha)}</span>}
+                                            <span className="text-caption" style={{ fontWeight: 700, color: est.overBudget ? 'var(--color-danger)' : 'var(--color-primary)' }}>~{formatDuration(est.totalMin * 60)} estimadas</span>
                                         </div>
                                     </div>
-                                    <button style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-danger)' }} onClick={() => deleteItinerary(itinerary.id)}>
-                                        <Trash2 size={16} />
-                                    </button>
+                                    <button style={{ padding: 8, borderRadius: 8, color: 'var(--color-danger)' }} onClick={() => deleteItinerary(itinerary.id)}><Trash2 size={16} /></button>
                                 </div>
-
-                                {itinerary.notas && (
-                                    <p className="text-caption text-secondary" style={{ marginBottom: 10, lineHeight: 1.5, fontStyle: 'italic' }}>{itinerary.notas}</p>
-                                )}
-
-                                {/* Eventos anclados a la fecha del día */}
                                 {dayEvents.map(ev => (
                                     <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', background: 'var(--color-gold-light)', border: '1px solid var(--color-gold)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginBottom: 8 }}>
                                         <PartyPopper size={15} style={{ color: 'var(--color-gold)', flexShrink: 0, marginTop: 2 }} />
-                                        <div>
-                                            <div style={{ fontWeight: 700, fontSize: 13 }}>{ev.nombre}</div>
-                                            <div className="text-caption text-secondary">
-                                                {est.stops.length > 0
-                                                    ? 'Hay un evento este día: cuenta con desplazamientos y aparcamiento extra.'
-                                                    : (ev.notas || 'Evento en tus fechas.')}
-                                            </div>
-                                        </div>
+                                        <div><div style={{ fontWeight: 700, fontSize: 13 }}>{ev.nombre}</div><div className="text-caption text-secondary">{ev.notas || 'Evento en tus fechas.'}</div></div>
                                     </div>
                                 ))}
-
-                                {/* Paradas del día */}
                                 {est.stops.length > 0 ? (
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                                         {est.stops.map(p => (
-                                            <button key={p.id} onClick={() => setPoiDetail(p)}
-                                                className="chip" style={{ background: (CATEGORY_MAP[p.category]?.color || '#6b7280') + '20', color: CATEGORY_MAP[p.category]?.color || '#334155', border: 'none', cursor: 'pointer' }}>
+                                            <button key={p.id} onClick={() => setPoiDetail(p)} className="chip" style={{ background: (CATEGORY_MAP[p.category]?.color || '#6b7280') + '20', color: CATEGORY_MAP[p.category]?.color || '#334155', border: 'none', cursor: 'pointer' }}>
                                                 {CATEGORY_MAP[p.category]?.emoji || '📍'} {p.name}
                                             </button>
                                         ))}
                                     </div>
-                                ) : (
-                                    <p className="text-caption text-tertiary" style={{ marginBottom: 12 }}>Sin paradas todavía. Añádelas desde el mapa o el listado.</p>
-                                )}
-
-                                {est.overBudget && (
-                                    <p className="text-caption" style={{ color: 'var(--color-danger)', fontWeight: 700, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        ⚠️ Día muy cargado (más de 10 h). Considera mover alguna parada a otro día.
-                                    </p>
-                                )}
-
+                                ) : <p className="text-caption text-tertiary" style={{ marginBottom: 12 }}>Sin paradas todavía.</p>}
                                 <button className="btn btn-primary btn-full" onClick={() => handlePlanSeedDay(itinerary)} disabled={est.stops.length === 0}>
-                                    <Navigation size={16} /> Planificar horarios de este día
+                                    <Navigation size={16} /> Planificar este día
                                 </button>
                             </div>
                         );
@@ -1163,62 +880,38 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                     const mapsUrl = buildMapsUrl(itinerary.startLoc, itinerary.optimizedPois, itinerary.endLoc);
                     return (
                         <div key={itinerary.id} className="card" style={{ marginBottom: 'var(--space-md)' }}>
-                            {/* Header */}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '16px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: 12, marginBottom: 16 }}>
                                 <div>
-                                    <h3 style={{ fontWeight: 700, fontSize: '17px' }}>{itinerary.title}</h3>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px', color: 'var(--color-primary)' }}>
-                                        <Clock size={13} />
-                                        <span className="text-caption" style={{ fontWeight: 700 }}>
-                                            Conducción total: {formatDuration(itinerary.totalDurationSec)}
-                                        </span>
+                                    <h3 style={{ fontWeight: 700, fontSize: 17 }}>{itinerary.title}</h3>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, color: 'var(--color-primary)', flexWrap: 'wrap' }}>
+                                        {itinerary.fecha && <span className="text-caption text-secondary">{fmtDate(itinerary.fecha)}</span>}
+                                        <span className="text-caption" style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 3 }}><Clock size={13} /> Conducción {formatDuration(itinerary.totalDurationSec)}</span>
                                     </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 6 }}>
-                                    {/* Ver en el mapa de la app */}
-                                    {onShowOnMap && (
-                                        <button
-                                            style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-primary)', border: '1px solid var(--border-color)' }}
-                                            onClick={() => onShowOnMap(itinerary)}
-                                            title="Ver la ruta en el mapa"
-                                        >
-                                            <Map size={15} />
-                                        </button>
-                                    )}
-                                    {/* Edit button */}
-                                    <button
-                                        style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-primary)', border: '1px solid var(--border-color)' }}
-                                        onClick={() => handleEditExisting(itinerary)}
-                                        title="Editar itinerario"
-                                    >
-                                        <Edit3 size={15} />
-                                    </button>
-                                    {/* Delete button */}
-                                    <button style={{ padding: '8px', borderRadius: '8px', color: 'var(--color-danger)' }}
-                                        onClick={() => deleteItinerary(itinerary.id)}>
-                                        <Trash2 size={16} />
-                                    </button>
+                                    {onShowOnMap && <button style={{ padding: 8, borderRadius: 8, color: 'var(--color-primary)', border: '1px solid var(--border-color)' }} onClick={() => onShowOnMap(itinerary)} title="Ver la ruta en el mapa"><Map size={15} /></button>}
+                                    <button style={{ padding: 8, borderRadius: 8, color: 'var(--color-primary)', border: '1px solid var(--border-color)' }} onClick={() => handleEditExisting(itinerary)} title="Editar"><Edit3 size={15} /></button>
+                                    <button style={{ padding: 8, borderRadius: 8, color: 'var(--color-danger)' }} onClick={() => deleteItinerary(itinerary.id)}><Trash2 size={16} /></button>
                                 </div>
                             </div>
 
-                            {/* Resumen razonado del día (estilo guía) */}
-                            {itinerary.summary && (
-                                <p className="text-caption text-secondary" style={{ marginBottom: 14, lineHeight: 1.55, fontStyle: 'italic' }}>
-                                    {itinerary.summary}
-                                </p>
+                            {/* Por qué este orden */}
+                            {(itinerary.summary || (itinerary.avisos && itinerary.avisos.length > 0)) && (
+                                <div style={{ background: 'var(--color-primary-light)', borderRadius: 'var(--radius-md)', padding: '10px 12px', marginBottom: 16 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: itinerary.summary ? 6 : 0 }}>
+                                        <Lightbulb size={15} style={{ color: 'var(--color-primary)' }} />
+                                        <span className="text-caption" style={{ fontWeight: 800, color: 'var(--color-primary)' }}>Por qué este orden</span>
+                                    </div>
+                                    {itinerary.summary && <p className="text-caption text-secondary" style={{ lineHeight: 1.55 }}>{itinerary.summary}</p>}
+                                    {(itinerary.avisos || []).map((a, i) => (
+                                        <p key={i} className="text-caption" style={{ display: 'flex', gap: 6, alignItems: 'flex-start', color: 'var(--color-danger)', marginTop: 6 }}><AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 2 }} /> {a}</p>
+                                    ))}
+                                </div>
                             )}
 
-                            {/* Open in Google Maps button */}
                             {mapsUrl && (
-                                <a
-                                    href={mapsUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="btn btn-outline"
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 16, textDecoration: 'none', fontSize: '13px' }}
-                                >
-                                    <Map size={15} /> Ver recorrido en Google Maps
-                                    <ExternalLink size={13} />
+                                <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 16, textDecoration: 'none', fontSize: 13 }}>
+                                    <Map size={15} /> Ver recorrido en Google Maps <ExternalLink size={13} />
                                 </a>
                             )}
 
@@ -1228,56 +921,35 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                                 const dotColor = step.type === 'meal' ? '#f97316' : step.type === 'poi' ? 'var(--color-primary)' : step.type === 'free' ? 'var(--color-gold)' : '#6b7280';
                                 const poiData = step.poiId ? trip.pois.find(p => p.id === step.poiId) : null;
                                 return (
-                                    <div key={i} style={{ display: 'flex', gap: '12px' }}>
-                                        {/* Dot + line */}
+                                    <div key={i} style={{ display: 'flex', gap: 12 }}>
                                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
-                                            <div style={{
-                                                width: step.type === 'poi' ? '26px' : '18px',
-                                                height: step.type === 'poi' ? '26px' : '18px',
-                                                borderRadius: '50%',
-                                                background: dotColor,
-                                                color: 'white',
-                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                fontSize: '11px', fontWeight: 'bold',
-                                                flexShrink: 0,
-                                            }}>
+                                            <div style={{ width: step.type === 'poi' ? 26 : 18, height: step.type === 'poi' ? 26 : 18, borderRadius: '50%', background: dotColor, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 'bold', flexShrink: 0 }}>
                                                 {step.type === 'poi' ? (itinerary.timeline.slice(0, i).filter(s => s.type === 'poi').length + 1) : ''}
                                                 {step.type === 'meal' && <Utensils size={10} />}
                                                 {step.type === 'free' && <Sparkles size={10} />}
                                                 {(step.type === 'departure' || step.type === 'arrival') && <Navigation size={9} />}
                                             </div>
-                                            {!isLast && <div style={{ width: '2px', flex: 1, background: 'var(--border-color)', margin: '4px 0', minHeight: '20px' }} />}
+                                            {!isLast && <div style={{ width: 2, flex: 1, background: 'var(--border-color)', margin: '4px 0', minHeight: 20 }} />}
                                         </div>
-
-                                        {/* Content */}
-                                        <div style={{ flex: 1, paddingBottom: isLast ? 0 : '14px' }}>
-                                            <div
-                                                style={{ display: 'flex', gap: '8px', alignItems: 'baseline', cursor: poiData ? 'pointer' : 'default' }}
-                                                onClick={() => poiData && setPoiDetail(poiData)}
-                                            >
-                                                <span style={{ fontSize: '12px', fontWeight: 800, color: dotColor, fontVariantNumeric: 'tabular-nums', minWidth: '42px' }}>
-                                                    {step.time}
-                                                </span>
-                                                <span style={{ fontWeight: 700, fontSize: '14px', color: poiData ? 'var(--color-primary)' : 'inherit', textDecoration: poiData ? 'underline dotted' : 'none' }}>
-                                                    {step.name}
-                                                </span>
+                                        <div style={{ flex: 1, paddingBottom: isLast ? 0 : 14, minWidth: 0 }}>
+                                            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', cursor: poiData ? 'pointer' : 'default', flexWrap: 'wrap' }} onClick={() => poiData && setPoiDetail(poiData)}>
+                                                <span style={{ fontSize: 12, fontWeight: 800, color: dotColor, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>{step.time}</span>
+                                                <span style={{ fontWeight: 700, fontSize: 14, color: poiData ? 'var(--color-primary)' : 'inherit', textDecoration: poiData ? 'underline dotted' : 'none' }}>{step.name}</span>
+                                                {step.origen && <OrigenBadge origen={step.origen} fecha={step.eventoFecha} />}
                                             </div>
                                             {step.visitDurationText && (
-                                                <span className="text-caption text-secondary" style={{ marginLeft: '50px', display: 'block' }}>
-                                                    🕒 {step.visitDurationText}
-                                                    {step.leg && ` · ${step.leg.icon || '🚗'} ${step.leg.durationText} (${step.leg.distanceText})`}
+                                                <span className="text-caption text-secondary" style={{ marginLeft: 50, display: 'block' }}>
+                                                    🕒 {step.visitDurationText}{step.leg && ` · ${step.leg.icon || '🚗'} ${step.leg.durationText}`}
                                                 </span>
                                             )}
                                             {step.type === 'meal' && (
-                                                <span className="text-caption" style={{ marginLeft: '50px', display: 'block', fontWeight: 600, color: '#f97316' }}>
-                                                    {step.mealTime}
-                                                    {step.rating && ` · ⭐ ${step.rating}`}
-                                                    {step.vicinity && ` · ${step.vicinity}`}
+                                                <span className="text-caption" style={{ marginLeft: 50, display: 'block', fontWeight: 600, color: '#f97316' }}>
+                                                    {step.mealTime}{step.rating && ` · ⭐ ${step.rating}`}{step.vicinity && ` · ${step.vicinity}`}
                                                 </span>
                                             )}
                                             {step.note && (
-                                                <span className="text-caption text-secondary" style={{ marginLeft: '50px', display: 'block', lineHeight: 1.45, marginTop: '3px' }}>
-                                                    {step.note}
+                                                <span className="text-caption text-secondary" style={{ marginLeft: 50, display: 'flex', gap: 4, lineHeight: 1.45, marginTop: 3 }}>
+                                                    <Lightbulb size={12} style={{ flexShrink: 0, marginTop: 2, color: 'var(--color-gold)' }} /> {step.note}
                                                 </span>
                                             )}
                                         </div>
@@ -1291,26 +963,57 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                 {itineraries.length === 0 && (
                     <div className="empty-state" style={{ marginTop: 'var(--space-xl)' }}>
                         <Navigation size={48} />
-                        <p className="text-body text-tertiary">Aún no has creado rutas diarias.</p>
+                        <p className="text-body text-tertiary">Aún no has creado días. Pulsa el botón para planificar tu primer día con la IA.</p>
                     </div>
                 )}
             </div>
 
             <button className="btn btn-outline btn-full" onClick={handleCreateNew} style={{ marginTop: 'var(--space-lg)' }}>
-                <Plus size={16} /> Crear Ruta Diaria
+                <Plus size={16} /> Planificar un día
             </button>
 
-            {/* POI Detail Modal */}
             {poiDetail && (
-                <PoiDetailModal
-                    poi={trip.pois.find(p => p.id === poiDetail.id) || poiDetail}
-                    trip={trip}
-                    onClose={() => setPoiDetail(null)}
-                    onDelete={() => setPoiDetail(null)}
-                    onUpdate={(updates) => store.updatePoi(trip.id, poiDetail.id, updates)}
-                    onSaveDistances={(records) => store.saveDistances(trip.id, records)}
-                />
+                <PoiDetailModal poi={trip.pois.find(p => p.id === poiDetail.id) || poiDetail} trip={trip}
+                    onClose={() => setPoiDetail(null)} onDelete={() => setPoiDetail(null)}
+                    onUpdate={(u) => store.updatePoi(trip.id, poiDetail.id, u)} onSaveDistances={(r) => store.saveDistances(trip.id, r)} />
             )}
+        </div>
+    );
+}
+
+// Suma días a una fecha ISO (yyyy-mm-dd).
+function addDaysISO(iso, days) {
+    const d = new Date(iso + 'T00:00:00');
+    if (isNaN(d)) return null;
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
+// Fila de lugar en el planificador (fijado / sin elegir / asignado a otro día).
+function PoiRow({ poi, state, dayNum, onToggle, onOpen }) {
+    const border = state === 'fixed' ? '1px solid var(--color-primary)' : '1px solid transparent';
+    return (
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10, border }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={onOpen}>
+                <div className="poi-img" style={{ width: 44, height: 44, flexShrink: 0 }}>
+                    <img src={poi.photoUrl || getPlaceholderImage(poi.name)} alt="" onError={e => { e.currentTarget.src = getPlaceholderImage(poi.name); }} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                    <div className="truncate" style={{ fontWeight: 700, fontSize: 14, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span>{CATEGORY_MAP[poi.category]?.emoji || '📍'}</span><span className="truncate">{poi.name}</span>
+                    </div>
+                    <div className="text-caption text-secondary truncate">
+                        {CATEGORY_MAP[poi.category]?.label || 'Lugar'}{poi.municipio ? ` · ${poi.municipio}` : ''}
+                    </div>
+                </div>
+            </div>
+            <button onClick={onToggle} aria-label={state === 'fixed' ? 'Quitar del día' : 'Fijar al día'} style={{ flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                {state === 'fixed'
+                    ? <span className="chip" style={{ fontSize: 11, padding: '4px 10px', background: 'var(--color-primary)', color: '#fff', fontWeight: 800 }}>📌 Fijado</span>
+                    : state === 'other'
+                        ? <span className="chip" style={{ fontSize: 11, padding: '4px 10px', background: '#10b98120', color: '#059669', fontWeight: 800 }}>Día {dayNum} ✓</span>
+                        : <span style={{ width: 22, height: 22, borderRadius: '50%', border: '2px solid var(--text-tertiary)', display: 'inline-block' }} />}
+            </button>
         </div>
     );
 }
