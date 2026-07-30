@@ -122,6 +122,7 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
     const [fixedIds, setFixedIds] = useState([]);            // poiIds fijados a ESTE día
     const [fixedEvents, setFixedEvents] = useState([]);      // nombres de eventos fijados
     const [zoneFilter, setZoneFilter] = useState('all');
+    const [catFilter, setCatFilter] = useState('all');
     const [search, setSearch] = useState('');
     const [aiInstructions, setAiInstructions] = useState('');
     const [aiDays, setAiDays] = useState(1);
@@ -288,9 +289,16 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                 try { restaurant = await searchNearbyRestaurant(near, 1500); } catch { /* sin restaurante */ }
                 const lat = restaurant?.lat || near.lat;
                 const lng = restaurant?.lng || near.lng;
+                // Red de seguridad de horarios: almuerzo nunca antes de 14:00, cena nunca antes de 21:00.
+                const kind = /cena/i.test(it.nombre || '') ? 'Cena' : 'Almuerzo';
+                const hm = (it.hora || '').split(':').map(Number);
+                const mins = hm.length === 2 ? hm[0] * 60 + hm[1] : null;
+                let mealTime = it.hora;
+                if (mins != null && kind === 'Almuerzo' && mins < 14 * 60) mealTime = '14:00';
+                if (mins != null && kind === 'Cena' && mins < 21 * 60) mealTime = '21:00';
                 timeline.push({
-                    type: 'meal', mealTime: it.nombre || 'Comida', time: it.hora,
-                    name: restaurant ? `🍴 ${restaurant.name}` : `🍴 ${it.nombre || 'Comida'}`,
+                    type: 'meal', mealTime: kind, time: mealTime,
+                    name: restaurant ? `🍴 ${restaurant.name}` : `🍴 ${it.nombre || kind}`,
                     rating: restaurant?.rating || null, vicinity: restaurant?.vicinity || '',
                     lat, lng, icon: '🍴', note: it.motivo || '', origen: 'ia',
                 });
@@ -530,23 +538,27 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
     // ===================== RENDER: PLANIFICAR RUTA =====================
     if (editingDay) {
         const editingDayNumber = itineraries.findIndex(i => i.id === editingDay) + 1;
-        const filteredList = activePois.filter(p => zoneFilter === 'all' || zonaByPoi[p.id] === zoneFilter);
+        const filteredList = activePois.filter(p =>
+            (zoneFilter === 'all' || zonaByPoi[p.id] === zoneFilter) &&
+            (catFilter === 'all' || p.category === catFilter));
         const q = search.trim().toLowerCase();
         const searchFiltered = q ? filteredList.filter(p => p.name.toLowerCase().includes(q) || (p.municipio || '').toLowerCase().includes(q)) : filteredList;
         const fixedPois = fixedIds.map(poiById).filter(Boolean);
         const listPois = searchFiltered.filter(p => !fixedIds.includes(p.id));
+        // Categorías presentes entre los lugares activos (para el filtro rápido).
+        const presentCats = [...new Set(activePois.map(p => p.category))].map(id => CATEGORY_MAP[id]).filter(Boolean);
         const mapCenter = { lat: trip.destinationLat || activePois[0]?.lat || 36.5, lng: trip.destinationLng || activePois[0]?.lng || -6.1 };
         const popupPoi = mapPopupId ? poiById(mapPopupId) : null;
 
         const pinColor = (p) => fixedIds.includes(p.id) ? PIN_FIXED : (assignedByPoi[p.id] ? PIN_OTHER : PIN_UNSET);
-        const dimmed = (p) => zoneFilter !== 'all' && zonaByPoi[p.id] !== zoneFilter;
+        const dimmed = (p) => (zoneFilter !== 'all' && zonaByPoi[p.id] !== zoneFilter) || (catFilter !== 'all' && p.category !== catFilter);
 
         const cta = mode === 'ordenar'
             ? (fixedIds.length < 2 ? 'Fija 2+ lugares' : `✨ Ordenar ${fixedIds.length} lugares`)
             : (aiDays > 1 ? `✨ Generar ${aiDays} días` : (fixedIds.length ? `✨ Generar día · ${fixedIds.length} fijados` : '✨ Generar día con IA'));
 
         return (
-            <div className="animate-fade-in-up" style={{ paddingBottom: 96 }}>
+            <div className="animate-fade-in-up" style={{ paddingBottom: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-sm)' }}>
                     <div>
                         <h2 className="text-subtitle">Planificar Ruta</h2>
@@ -559,31 +571,31 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
 
                 {/* Config del día */}
                 <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
-                    <div style={{ display: 'flex', gap: 'var(--space-md)' }}>
-                        <div style={{ flex: 2 }}>
-                            <label className="field-label">Día</label>
-                            <input className="input-field" style={{ padding: '10px 12px' }} value={title} onChange={e => setTitle(e.target.value)} />
-                        </div>
-                        <div style={{ flex: 1.4 }}>
+                    <div>
+                        <label className="field-label">Día</label>
+                        <input className="input-field" style={{ padding: '10px 12px', width: '100%', boxSizing: 'border-box' }} value={title} onChange={e => setTitle(e.target.value)} />
+                    </div>
+                    <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                             <label className="field-label">Fecha</label>
-                            <input className="input-field" type="date" style={{ padding: '10px 12px' }} value={dayDate} onChange={e => setDayDate(e.target.value)} />
+                            <input className="input-field" type="date" style={{ padding: '10px 12px', width: '100%', minWidth: 0, boxSizing: 'border-box' }} value={dayDate} onChange={e => setDayDate(e.target.value)} />
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                             <label className="field-label">Hora inicio</label>
-                            <input className="input-field" type="time" style={{ padding: '10px 12px' }} value={startTime} onChange={e => setStartTime(e.target.value)} />
+                            <input className="input-field" type="time" style={{ padding: '10px 12px', width: '100%', minWidth: 0, boxSizing: 'border-box' }} value={startTime} onChange={e => setStartTime(e.target.value)} />
                         </div>
                     </div>
                     <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                             <label className="field-label">Salida</label>
-                            <select className="input-field" style={{ padding: '10px 12px' }} value={startId} onChange={e => setStartId(e.target.value)}>
+                            <select className="input-field" style={{ padding: '10px 12px', width: '100%', minWidth: 0, boxSizing: 'border-box' }} value={startId} onChange={e => setStartId(e.target.value)}>
                                 <option value="">Seleccionar...</option>
                                 {allLocations.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
                             </select>
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                             <label className="field-label">Regreso</label>
-                            <select className="input-field" style={{ padding: '10px 12px' }} value={endId} onChange={e => setEndId(e.target.value)}>
+                            <select className="input-field" style={{ padding: '10px 12px', width: '100%', minWidth: 0, boxSizing: 'border-box' }} value={endId} onChange={e => setEndId(e.target.value)}>
                                 <option value="">Seleccionar...</option>
                                 {allLocations.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
                             </select>
@@ -702,11 +714,23 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
 
                 {/* Chips de zona */}
                 {zones.length > 1 && (
-                    <div className="chip-row" style={{ marginBottom: 'var(--space-md)' }}>
-                        <button className={`chip ${zoneFilter === 'all' ? 'active' : ''}`} onClick={() => setZoneFilter('all')}>Todo {activePois.length}</button>
+                    <div className="chip-row" style={{ marginBottom: 8 }}>
+                        <button className={`chip ${zoneFilter === 'all' ? 'active' : ''}`} onClick={() => setZoneFilter('all')}>📍 Todo {activePois.length}</button>
                         {zones.map(z => (
                             <button key={z.name} className={`chip ${zoneFilter === z.name ? 'active' : ''}`} onClick={() => setZoneFilter(z.name)}>
                                 {z.name.split(' y ')[0].split(',')[0]} {z.count}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
+                {/* Chips de categoría (playas, pueblos, miradores…) */}
+                {presentCats.length > 1 && (
+                    <div className="chip-row" style={{ marginBottom: 'var(--space-md)' }}>
+                        <button className={`chip ${catFilter === 'all' ? 'active' : ''}`} onClick={() => setCatFilter('all')}>Todas</button>
+                        {presentCats.map(c => (
+                            <button key={c.id} className={`chip ${catFilter === c.id ? 'active' : ''}`} onClick={() => setCatFilter(c.id)}>
+                                {c.emoji} {c.label}
                             </button>
                         ))}
                     </div>
@@ -741,8 +765,8 @@ export default function ItineraryTab({ trip, store, onShowOnMap }) {
                         placeholder="Opcional: sin madrugar, terraza para cenar, evitar mucho coche..." value={aiInstructions} onChange={e => setAiInstructions(e.target.value)} />
                 </div>
 
-                {/* CTA fija inferior */}
-                <div style={{ position: 'fixed', left: 0, right: 0, bottom: 'var(--nav-height)', maxWidth: 480, margin: '0 auto', padding: '10px 16px', background: 'var(--bg-primary)', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 10, alignItems: 'center', zIndex: 50 }}>
+                {/* CTA: sticky (siempre visible, pero en el flujo: baja con el contenido y no tapa las indicaciones) */}
+                <div style={{ position: 'sticky', bottom: 'calc(var(--nav-height) + 8px)', marginTop: 'var(--space-lg)', padding: '10px 12px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)', display: 'flex', gap: 10, alignItems: 'center', zIndex: 30 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                         <button type="button" className="btn btn-outline" style={{ width: 36, height: 40, padding: 0, borderRadius: 10 }} onClick={() => setAiDays(d => Math.max(1, (parseInt(d, 10) || 1) - 1))}>−</button>
                         <span style={{ width: 24, textAlign: 'center', fontWeight: 800 }}>{aiDays}</span>

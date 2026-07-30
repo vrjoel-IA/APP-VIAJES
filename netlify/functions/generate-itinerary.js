@@ -86,8 +86,15 @@ No apliques reglas fijas; razona ESTE día. Considera:
 - Coherencia de "vestuario y modo": evita alternancias incómodas (bañador+arena a un casco
   antiguo, o cortar un bloque de playa para una visita cultural y volver). Agrupa lo compatible
   en bloques, en el orden que tenga más sentido HOY (a veces playa por la mañana es lo lógico).
-- Horarios reales: apertura de monumentos/bodegas, espectáculos, comidas en España
-  (almuerzo ~14:00, cena ~21:00), hora real del atardecer para lugares de atardecer.
+- HORARIOS DE COMIDA EN ESPAÑA (REGLA ESTRICTA, obligatoria):
+  · ALMUERZO ("comida"): SIEMPRE entre las 14:00 y las 15:30. NUNCA antes de las 14:00.
+    PROHIBIDO poner el almuerzo a las 12:00, 12:30, 13:00 o 13:30.
+  · CENA: SIEMPRE entre las 21:00 y las 22:30. NUNCA antes de las 21:00.
+    PROHIBIDO poner la cena a las 19:00, 19:30 o 20:00.
+  Si a la hora de comer aún no toca (p. ej. son las 13:00), encadena otra actividad corta
+  y coloca el almuerzo a partir de las 14:00. Ajusta el resto del día alrededor de estas horas.
+- Otros horarios reales: apertura de monumentos/bodegas, espectáculos, y hora real del
+  atardecer para lugares cuyo interés es el atardecer.
 - Clima y estación (calor de mediodía en verano), geografía (minimiza coche, agrupa por
   cercanía, no vuelvas sobre tus pasos; la comida cerca de la SIGUIENTE parada como bisagra).
 - Excursiones de jornada completa (p. ej. ferry): ocupan el día entero; si hay otros fijados
